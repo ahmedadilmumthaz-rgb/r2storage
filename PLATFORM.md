@@ -218,3 +218,11 @@ work; a Docker socket file or shell script can snapshot volumes by container.
 - Control plane: `cd platform && npm run lint && npm run build`, then the E2E
   flow: signup → verify (auto) → `POST /api/instances` → check the container
   `docker ps` → `GET /api/instances` / `/api/usage` → suspend/resume/delete.
+- **Full platform smoke** (`scripts/platform-smoke.sh`): drives the whole
+  customer journey against a running platform — signup → verify → auto-provision
+  → tenant quota (free = 5 GiB) → S3 PUT/GET → metering → billing 501 → operator
+  console with live health → suspend/resume/delete (auto-cleans its instance).
+  Set `OPERATOR_EMAIL`/`OPERATOR_PASSWORD` for the operator checks and
+  `METER_KEY` to exercise the snapshot path (unset: asserts the 401 guard +
+  no-snapshot shape). On SMTP-configured deploys pass `SMOKE_VERIFY_TOKEN` to
+  skip the signup step.
