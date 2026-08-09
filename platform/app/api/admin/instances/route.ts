@@ -2,6 +2,7 @@ import { db } from '@/lib/db';
 import { requireOperator } from '@/lib/session';
 import { cfHostnameStatus } from '@/lib/provision';
 import { checkInstanceHealth } from '@/lib/health';
+import { decryptSecret } from '@/lib/crypto';
 import { ok, fail } from '@/lib/http';
 
 export async function GET() {
@@ -21,7 +22,7 @@ export async function GET() {
         where: { instanceId: i.id },
         orderBy: { at: 'desc' },
       });
-      const health = i.status === 'active' ? await checkInstanceHealth(i.port) : null;
+      const health = i.status === 'active' ? await checkInstanceHealth(i.port, decryptSecret(i.adminSecretEnc)) : null;
       return {
         id: i.id,
         domain: i.domain,

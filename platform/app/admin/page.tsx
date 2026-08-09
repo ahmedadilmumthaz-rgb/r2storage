@@ -14,7 +14,7 @@ type AdminRow = {
   customer: { email: string; name: string };
   cfStatus: string | null;
   cfSslStatus: string | null;
-  health: { healthy: boolean; latencyMs: number | null } | null;
+  health: { healthy: boolean; latencyMs: number | null; quota: { storageBytesLimit: number; storageBytes: number } | null } | null;
   usage: { storageBytes: string; requests: number; bytesTransferred: string; at: string } | null;
 };
 
@@ -132,6 +132,7 @@ export default function AdminPage() {
               <th>Status</th>
               <th>Port</th>
               <th>Health</th>
+              <th>Quota</th>
               <th>Plan</th>
               <th>Usage</th>
               <th>CF TLS</th>
@@ -156,6 +157,13 @@ export default function AdminPage() {
                   ) : (
                     <span className="pill suspended">down</span>
                   )}
+                </td>
+                <td>
+                  {r.health?.quota
+                    ? r.health.quota.storageBytesLimit > 0
+                      ? `${fmt(String(r.health.quota.storageBytes))} / ${fmt(String(r.health.quota.storageBytesLimit))}`
+                      : `${fmt(String(r.health.quota.storageBytes))} · unlimited`
+                    : '—'}
                 </td>
                 <td>{r.plan}</td>
                 <td>
