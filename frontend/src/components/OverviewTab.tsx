@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { HardDrive, FolderArchive, Key, Globe, Activity, ShieldCheck, ArrowUpRight } from 'lucide-react';
+import { HardDrive, FolderArchive, Key, Globe, Activity, ShieldCheck, ArrowUpRight, AlertTriangle } from 'lucide-react';
 import { adminFetch } from '../api';
 
 interface OverviewData {
@@ -20,15 +20,24 @@ interface OverviewData {
   }>;
 }
 
+interface QuotaData {
+  storageBytesLimit: number; // 0 = unlimited
+  storageBytes: number;
+}
+
 export const OverviewTab: React.FC<{ onNavigate: (tab: string) => void }> = ({ onNavigate }) => {
   const [data, setData] = useState<OverviewData | null>(null);
+  const [quota, setQuota] = useState<QuotaData | null>(null);
   const [loading, setLoading] = useState(true);
 
   const fetchOverview = async () => {
     try {
-      const res = await adminFetch('/api/admin/overview');
-      const json = await res.json();
-      setData(json);
+      const [overview, quotaRes] = await Promise.all([
+        adminFetch('/api/admin/overview'),
+        adminFetch('/api/admin/quota'),
+      ]);
+      setData(await overview.json());
+      setQuota(await quotaRes.json());
     } catch (err) {
       console.error('Failed to fetch overview stats', err);
     } finally {
@@ -80,6 +89,37 @@ export const OverviewTab: React.FC<{ onNavigate: (tab: string) => void }> = ({ o
           </button>
         </div>
       </div>
+
+      {/* Storage quota */}
+      {quota && quota.storageBytesLimit > 0 && (() => {
+        const pct = Math.min(100, (quota.storageBytes / quota.storageBytesLimit) * 100);
+        const nearFull = pct >= 90;
+        return (
+          <div className="glass-panel p-5 rounded-2xl">
+            <div className="flex items-center justify-between mb-3">
+              <div className="flex items-center gap-2">
+                <HardDrive className="w-4 h-4 text-brand-500" />
+                <h3 className="text-sm font-semibold text-white">Storage quota</h3>
+              </div>
+              <span className="text-xs text-slate-400">
+                {formatBytes(quota.storageBytes)} of {formatBytes(quota.storageBytesLimit)} used ({pct.toFixed(0)}%)
+              </span>
+            </div>
+            <div className="h-2 rounded-full bg-dark-800 overflow-hidden">
+              <div
+                className={`h-full rounded-full transition-all ${nearFull ? 'bg-rose-500' : 'bg-brand-500'}`}
+                style={{ width: `${pct}%` }}
+              />
+            </div>
+            {nearFull && (
+              <p className="flex items-center gap-1.5 text-rose-400 text-xs mt-2">
+                <AlertTriangle className="w-3.5 h-3.5" />
+                Quota nearly full — new writes are rejected with 507 until you free up space.
+              </p>
+            )}
+          </div>
+        );
+      })()}
 
       {/* Metrics Grid */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-5">
