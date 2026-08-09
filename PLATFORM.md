@@ -113,9 +113,12 @@ Log in at `/login` with that email/password → redirected to `/admin`.
 The operator console lists every instance with a **Health** column: on each
 load it live-probes the tenant's `/health` endpoint (5s timeout) so a container
 that is crash-looping or unreachable shows `down` even though its DB status is
-still `active` (`platform/lib/health.ts`). For active instances you also get
-response latency; suspended/deleted instances show `—`. The dashboard's
-"Poll usage now" button triggers `meterAll` for fresh usage numbers.
+still `active` (`platform/lib/health.ts`). The same probe also reads the
+tenant's `/api/admin/quota`, powering a **Quota** column (used / limit, or
+`unlimited`; `—` for containers running a pre-quota image). For active
+instances you also get response latency; suspended/deleted instances show `—`.
+The dashboard's "Poll usage now" button triggers `meterAll` for fresh usage
+numbers.
 
 ### Cloudflare SSL for SaaS (per-customer domains)
 
