@@ -14,6 +14,7 @@ type AdminRow = {
   customer: { email: string; name: string };
   cfStatus: string | null;
   cfSslStatus: string | null;
+  health: { healthy: boolean; latencyMs: number | null } | null;
   usage: { storageBytes: string; requests: number; bytesTransferred: string; at: string } | null;
 };
 
@@ -130,6 +131,7 @@ export default function AdminPage() {
               <th>Customer</th>
               <th>Status</th>
               <th>Port</th>
+              <th>Health</th>
               <th>Plan</th>
               <th>Usage</th>
               <th>CF TLS</th>
@@ -146,6 +148,15 @@ export default function AdminPage() {
                 </td>
                 <td><span className={`pill ${r.status}`}>{r.status}</span></td>
                 <td className="mono">{r.port}</td>
+                <td>
+                  {r.health === null ? (
+                    <span className="muted">—</span>
+                  ) : r.health.healthy ? (
+                    <span className="pill active">ok {r.health.latencyMs}ms</span>
+                  ) : (
+                    <span className="pill suspended">down</span>
+                  )}
+                </td>
                 <td>{r.plan}</td>
                 <td>
                   {r.usage

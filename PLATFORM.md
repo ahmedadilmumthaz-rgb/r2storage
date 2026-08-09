@@ -110,6 +110,13 @@ OPERATOR_PASSWORD_HASH="\$2b\$12\$Bcbg..."
 
 Log in at `/login` with that email/password → redirected to `/admin`.
 
+The operator console lists every instance with a **Health** column: on each
+load it live-probes the tenant's `/health` endpoint (5s timeout) so a container
+that is crash-looping or unreachable shows `down` even though its DB status is
+still `active` (`platform/lib/health.ts`). For active instances you also get
+response latency; suspended/deleted instances show `—`. The dashboard's
+"Poll usage now" button triggers `meterAll` for fresh usage numbers.
+
 ### Cloudflare SSL for SaaS (per-customer domains)
 
 1. Add `PLATFORM_DOMAIN` as a zone on Cloudflare, and point

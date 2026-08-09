@@ -1,6 +1,7 @@
 import { db } from '@/lib/db';
 import { requireOperator } from '@/lib/session';
 import { cfHostnameStatus } from '@/lib/provision';
+import { checkInstanceHealth } from '@/lib/health';
 import { ok, fail } from '@/lib/http';
 
 export async function GET() {
@@ -20,6 +21,7 @@ export async function GET() {
         where: { instanceId: i.id },
         orderBy: { at: 'desc' },
       });
+      const health = i.status === 'active' ? await checkInstanceHealth(i.port) : null;
       return {
         id: i.id,
         domain: i.domain,
@@ -31,6 +33,7 @@ export async function GET() {
         customer: i.customer,
         cfStatus: cf.status,
         cfSslStatus: cf.sslStatus,
+        health,
         usage: latest
           ? {
               storageBytes: latest.storageBytes.toString(),
