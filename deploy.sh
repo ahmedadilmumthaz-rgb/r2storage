@@ -10,7 +10,7 @@
 #   INSTANCE=project2 BASE_DOMAIN=project2.com PORT=4001 ./deploy.sh
 #
 # (Each project needs its own domain: the origin cert must cover
-# BASE_DOMAIN + *.__DOMAIN__ — a Cloudflare origin cert only covers the apex
+# BASE_DOMAIN + *.BASE_DOMAIN — a Cloudflare origin cert only covers the apex
 # plus ONE wildcard level, so cdn.project1.com works but cdn.project1.example.com
 # would not be covered by a cert for example.com + *.example.com.)
 #
