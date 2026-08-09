@@ -109,7 +109,12 @@ async function start() {
       return { status: 'ok', service: 'r2storage', timestamp: new Date() };
     });
 
-    if (CONFIG.ADMIN_SECRET === 'r2storage-admin-secret-key-change-me') {
+    const DEFAULT_SECRET = 'r2storage-admin-secret-key-change-me';
+    if (CONFIG.ADMIN_SECRET === DEFAULT_SECRET) {
+      if (CONFIG.IS_PRODUCTION) {
+        fastify.log.error('Refusing to start in production with the default ADMIN_SECRET. Set a strong ADMIN_SECRET env var.');
+        process.exit(1);
+      }
       console.warn('[WARNING] Using the default ADMIN_SECRET. Set a strong ADMIN_SECRET env var before public deployment.');
     }
 

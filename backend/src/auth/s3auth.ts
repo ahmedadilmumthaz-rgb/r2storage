@@ -1,5 +1,6 @@
 import crypto from 'crypto';
 import { db } from '../db';
+import { secretsEqual } from './secrets';
 
 export interface AuthResult {
   authenticated: boolean;
@@ -12,6 +13,12 @@ export interface AuthResult {
 const REGION = 'us-east-1';
 const SERVICE = 's3';
 const TERMINATOR = 'aws4_request';
+
+// Max allowed clock drift between the client and server. AWS enforces the same
+// 15-minute window so that a captured signed request cannot be replayed for the
+// rest of the day (signatures otherwise stay valid until the credential scope's
+// date rolls over).
+const REQUEST_SKEW_MS = 15 * 60 * 1000;
 
 function sha256Hex(input: string): string {
   return crypto.createHash('sha256').update(input).digest('hex');
@@ -136,11 +143,22 @@ export class S3Auth {
     const headerResult = await S3Auth.verifyHeaderSignature(headers, method, rawPath, rawQuery);
     if (headerResult) return headerResult;
 
-    // 3. Simple Bearer / Api-Key header (convenience for internal tools)
-    const apiKey = (headers['x-api-key'] || headers['x-access-key-id']) as string | undefined;
-    if (apiKey) {
-      const keyRecord = await db.accessKey.findUnique({ where: { accessKeyId: apiKey } });
+    // 3. Convenience headers for simple tools. Both credentials are required:
+    //    - x-api-key: <secretAccessKey>   (looked up by secret; full access)
+    //    - x-access-key-id: <accessKeyId> + x-access-key-secret: <secretAccessKey>
+    //    An Access Key ID alone is NOT a credential (it appears in presigned
+    //    URLs and dashboards), so a bare x-access-key-id is rejected.
+    const apiKeyId = headers['x-access-key-id'] as string | undefined;
+    const apiKeySecret = (headers['x-access-key-secret'] || headers['x-api-key']) as string | undefined;
+    if (apiKeyId && apiKeySecret) {
+      const keyRecord = await db.accessKey.findUnique({ where: { accessKeyId: apiKeyId } });
+      if (keyRecord && secretsEqual(apiKeySecret, keyRecord.secretAccessKey)) return successfulAuth(keyRecord);
+      return { authenticated: false, error: 'Invalid access key credentials' };
+    }
+    if (!apiKeyId && apiKeySecret) {
+      const keyRecord = await db.accessKey.findFirst({ where: { secretAccessKey: apiKeySecret } });
       if (keyRecord) return successfulAuth(keyRecord);
+      return { authenticated: false, error: 'Invalid access key credentials' };
     }
 
     return { authenticated: false, error: 'Missing or invalid authentication credentials' };
@@ -163,13 +181,15 @@ export class S3Auth {
     const keyRecord = await db.accessKey.findUnique({ where: { accessKeyId: scope.accessKeyId } });
     if (!keyRecord) return { authenticated: false, error: 'Invalid Access Key ID' };
 
-    // Verify expiration
+    // Verify expiration. X-Amz-Date is the issue time, so it must not be too
+    // far in the future (prevents minting long-lived URLs with a forged date)
+    // and the URL must not have passed its expiry.
     const amzExpires = query['X-Amz-Expires'] as string | undefined;
     const amzDate = query['X-Amz-Date'] as string | undefined;
     if (amzExpires && amzDate) {
       const reqTime = parseAmzDate(amzDate);
       const expiresSeconds = parseInt(amzExpires, 10);
-      if (isNaN(reqTime) || Date.now() > reqTime + expiresSeconds * 1000) {
+      if (isNaN(reqTime) || reqTime - Date.now() > REQUEST_SKEW_MS || Date.now() > reqTime + expiresSeconds * 1000) {
         return { authenticated: false, error: 'Presigned URL has expired' };
       }
     }
@@ -230,6 +250,12 @@ export class S3Auth {
     const amzDate = (headers['x-amz-date'] as string) || formatDateHeaderToAmz((headers['date'] as string) || '');
     if (!amzDate) {
       return { authenticated: false, error: 'Missing request timestamp (x-amz-date)' };
+    }
+
+    // Replay protection: reject timestamps outside a 15-minute skew window.
+    const reqTime = parseAmzDate(amzDate);
+    if (isNaN(reqTime) || Math.abs(Date.now() - reqTime) > REQUEST_SKEW_MS) {
+      return { authenticated: false, error: 'Request timestamp is not recent enough (x-amz-date skew)' };
     }
 
     const canonicalHeaders = buildCanonicalHeaders(headers, signedHeaders);

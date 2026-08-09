@@ -47,8 +47,10 @@ Scripts can skip SigV4 entirely and authenticate with request headers:
 
 | Header | For |
 | --- | --- |
-| `x-api-key: <secretAccessKey>` | full access (for simple tools) |
-| `x-access-key-id: <accessKeyId>` | PUT/GET/HEAD with that key's permissions (the panel uses this) |
+| `x-access-key-id: <accessKeyId>` + `x-access-key-secret: <secretAccessKey>` | PUT/GET/HEAD with that key's permissions |
+| `x-api-key: <secretAccessKey>` | full access, looked up by secret |
+
+The Access Key ID alone is **not** a credential (it appears in presigned URLs and the dashboard); requests carrying only `x-access-key-id` are rejected.
 
 ---
 

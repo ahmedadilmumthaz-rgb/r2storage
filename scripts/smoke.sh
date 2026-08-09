@@ -132,8 +132,10 @@ check "create bucket" "201" "$BUCKET_CODE"
 R=$(curl -s -b "$COOKIES" -X POST -H "Content-Type: application/json" -d '{"name":"smoke","permission":"FULL","bucketFilter":"smoke"}' "$B/api/admin/keys")
 KEY_CODE="$(curl -s -o /dev/null -w "%{http_code}" -b "$COOKIES" -X POST -H "Content-Type: application/json" -d '{"name":"smoke2","permission":"FULL","bucketFilter":"smoke"}' "$B/api/admin/keys")"
 AK="$(json_field "$R" accessKeyId)"
+SK="$(json_field "$R" secretAccessKey)"
 check "create scoped access key" "201" "$KEY_CODE"
 [ -n "$AK" ] || { echo "✗ could not parse access key"; exit 1; }
+[ -n "$SK" ] || { echo "✗ could not parse access key secret"; exit 1; }
 
 # --- storage quota ---------------------------------------------------------------
 echo "== storage quota =="
@@ -143,13 +145,13 @@ check "quota rejects negative limit" "400" "$(status_of -H "X-Admin-Secret: $ADM
 check "quota set to 50B" "200" "$(status_of -H "X-Admin-Secret: $ADMIN_SECRET" -X PATCH -H "Content-Type: application/json" -d '{"storageBytesLimit":50}' "$B/api/admin/quota")"
 
 head -c 100 /dev/zero > "$TMP/big.bin"
-check "over-quota PUT -> 507" "507" "$(status_of -X PUT -H "x-access-key-id: $AK" --data-binary @"$TMP/big.bin" "$B/s3/smoke/overq.bin")"
-check "rejected object not committed (HEAD 404)" "404" "$(status_of -I -H "x-access-key-id: $AK" "$B/s3/smoke/overq.bin")"
+check "over-quota PUT -> 507" "507" "$(status_of -X PUT -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" --data-binary @"$TMP/big.bin" "$B/s3/smoke/overq.bin")"
+check "rejected object not committed (HEAD 404)" "404" "$(status_of -I -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" "$B/s3/smoke/overq.bin")"
 R=$(curl -s -H "X-Admin-Secret: $ADMIN_SECRET" "$B/api/admin/usage")
 check "usage unchanged after 507" "0" "$(json_field "$R" storageBytes)"
 
-check "under-quota PUT -> 200" "200" "$(status_of -X PUT -H "x-access-key-id: $AK" --data-binary 'under-quota' "$B/s3/smoke/underq.bin")"
-curl -s -o /dev/null -H "x-access-key-id: $AK" -X DELETE "$B/s3/smoke/underq.bin"
+check "under-quota PUT -> 200" "200" "$(status_of -X PUT -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" --data-binary 'under-quota' "$B/s3/smoke/underq.bin")"
+curl -s -o /dev/null -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" -X DELETE "$B/s3/smoke/underq.bin"
 rm -f "$TMP/big.bin"
 
 curl -s -o /dev/null -H "X-Admin-Secret: $ADMIN_SECRET" -X PATCH -H "Content-Type: application/json" -d '{"storageBytesLimit":0}' "$B/api/admin/quota"
@@ -159,11 +161,17 @@ check "quota restored to unlimited" "0" "$(json_field "$R" storageBytesLimit)"
 # --- S3 object operations -------------------------------------------------------
 echo "== S3 PUT/GET/HEAD/list =="
 printf 'smoke-test-content' > "$TMP/hello.txt"
-check "PUT object" "200" "$(status_of -X PUT -H "x-access-key-id: $AK" --data-binary @"$TMP/hello.txt" "$B/s3/smoke/hello.txt")"
-R=$(curl -s -H "x-access-key-id: $AK" "$B/s3/smoke/hello.txt")
+check "PUT object" "200" "$(status_of -X PUT -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" --data-binary @"$TMP/hello.txt" "$B/s3/smoke/hello.txt")"
+R=$(curl -s -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" "$B/s3/smoke/hello.txt")
 check "GET object content" "smoke-test-content" "$R"
-check "HEAD object" "200" "$(status_of -I -H "x-access-key-id: $AK" "$B/s3/smoke/hello.txt")"
-check "ListObjects" "200" "$(status_of -H "x-access-key-id: $AK" "$B/s3/smoke")"
+check "HEAD object" "200" "$(status_of -I -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" "$B/s3/smoke/hello.txt")"
+check "ListObjects" "200" "$(status_of -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" "$B/s3/smoke")"
+
+# --- auth hardening -------------------------------------------------------------
+echo "== auth hardening =="
+check "bare access key id (no secret) rejected" "403" "$(status_of -H "x-access-key-id: $AK" "$B/s3/smoke/hello.txt")"
+check "wrong access key secret rejected" "403" "$(status_of -H "x-access-key-id: $AK" -H "x-access-key-secret: wrong-secret" "$B/s3/smoke/hello.txt")"
+check "unknown x-api-key secret rejected" "403" "$(status_of -H "x-api-key: not-a-real-secret" "$B/s3/smoke/hello.txt")"
 
 R=$(curl -s -H "X-Admin-Secret: $ADMIN_SECRET" "$B/api/admin/usage")
 check "usage reports stored bytes" "18" "$(json_field "$R" storageBytes)"
@@ -175,18 +183,18 @@ check "usage since-future counts nothing" "0" "$(json_field "$R" requests)"
 
 # --- multipart ------------------------------------------------------------------
 echo "== multipart upload =="
-R=$(curl -s -X POST -H "x-access-key-id: $AK" "$B/s3/smoke/big.bin?uploads")
+R=$(curl -s -X POST -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" "$B/s3/smoke/big.bin?uploads")
 UPLOAD_ID="$(printf '%s' "$R" | sed -n 's:.*<UploadId>\([^<]*\)</UploadId>.*:\1:p')"
-check "create multipart upload" "200" "$(curl -s -o /dev/null -w "%{http_code}" -X POST -H "x-access-key-id: $AK" "$B/s3/smoke/big.bin?uploads")"
+check "create multipart upload" "200" "$(curl -s -o /dev/null -w "%{http_code}" -X POST -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" "$B/s3/smoke/big.bin?uploads")"
 [ -n "$UPLOAD_ID" ] || { echo "✗ no UploadId in XML"; exit 1; }
 
-ETAG1="$(curl -s -D - -o /dev/null -X PUT -H "x-access-key-id: $AK" --data-binary 'part-one' "$B/s3/smoke/big.bin?partNumber=1&uploadId=$UPLOAD_ID" | grep -i '^etag:' | tr -d '\r' | cut -d' ' -f2)"
-ETAG2="$(curl -s -D - -o /dev/null -X PUT -H "x-access-key-id: $AK" --data-binary 'part-two' "$B/s3/smoke/big.bin?partNumber=2&uploadId=$UPLOAD_ID" | grep -i '^etag:' | tr -d '\r' | cut -d' ' -f2)"
+ETAG1="$(curl -s -D - -o /dev/null -X PUT -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" --data-binary 'part-one' "$B/s3/smoke/big.bin?partNumber=1&uploadId=$UPLOAD_ID" | grep -i '^etag:' | tr -d '\r' | cut -d' ' -f2)"
+ETAG2="$(curl -s -D - -o /dev/null -X PUT -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" --data-binary 'part-two' "$B/s3/smoke/big.bin?partNumber=2&uploadId=$UPLOAD_ID" | grep -i '^etag:' | tr -d '\r' | cut -d' ' -f2)"
 [ -n "$ETAG1" ] && [ -n "$ETAG2" ] || { echo "✗ missing part ETags"; exit 1; }
 
 COMPLETE_XML="<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>$ETAG1</ETag></Part><Part><PartNumber>2</PartNumber><ETag>$ETAG2</ETag></Part></CompleteMultipartUpload>"
-curl -s -o /dev/null -X POST -H "x-access-key-id: $AK" -H "Content-Type: application/xml" --data "$COMPLETE_XML" "$B/s3/smoke/big.bin?uploadId=$UPLOAD_ID"
-R=$(curl -s -H "x-access-key-id: $AK" "$B/s3/smoke/big.bin")
+curl -s -o /dev/null -X POST -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" -H "Content-Type: application/xml" --data "$COMPLETE_XML" "$B/s3/smoke/big.bin?uploadId=$UPLOAD_ID"
+R=$(curl -s -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" "$B/s3/smoke/big.bin")
 check "multipart assembled" "part-onepart-two" "$R"
 
 # --- presigned + public bucket ----------------------------------------------------

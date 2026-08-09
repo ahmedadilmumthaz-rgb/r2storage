@@ -207,6 +207,15 @@ export async function adminRoutes(fastify: FastifyInstance) {
     const { name } = req.params as { name: string };
     const { key, expiresInSeconds } = req.body as { key: string; expiresInSeconds?: number };
 
+    // Cap presigned URL lifetime (7 days) so a generated URL can't be minted
+    // to outlive rotation of the underlying access key.
+    const maxLifetime = 7 * 24 * 60 * 60; // 604800 s
+    let lifetime = expiresInSeconds || 3600;
+    if (!Number.isFinite(lifetime) || lifetime <= 0) {
+      return reply.status(400).send({ error: 'expiresInSeconds must be a positive number of seconds.' });
+    }
+    lifetime = Math.min(lifetime, maxLifetime);
+
     // Prefer a key that can access this bucket (unrestricted or matching filter)
     const keyRecord =
       (await db.accessKey.findFirst({
@@ -228,10 +237,10 @@ export async function adminRoutes(fastify: FastifyInstance) {
       key,
       keyRecord.accessKeyId,
       keyRecord.secretAccessKey,
-      expiresInSeconds || 3600
+      lifetime
     );
 
-    return { url: presignedUrl, expiresInSeconds: expiresInSeconds || 3600 };
+    return { url: presignedUrl, expiresInSeconds: lifetime };
   });
 
   // 4. Access Keys API
