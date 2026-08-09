@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  backend:
+    name: Backend build + smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+      - name: Install backend deps
+        run: npm ci
+        working-directory: backend
+      - name: Build backend + frontend
+        run: npm run build --prefix backend && npm run build --prefix frontend
+      - name: Run smoke suite
+        run: bash scripts/smoke.sh
+
+  platform:
+    name: Platform lint + build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: platform/package-lock.json
+      - name: Install platform deps
+        run: npm ci
+        working-directory: platform
+      - name: Lint
+        run: npm run lint
+        working-directory: platform
+      - name: Build
+        run: npm run build
+        working-directory: platform
