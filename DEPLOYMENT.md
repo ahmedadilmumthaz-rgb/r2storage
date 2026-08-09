@@ -1,6 +1,25 @@
-# Deployment Guide
+# Deployment Guide (baremetal)
 
-Complete guide for putting R2 Storage Platform on a production VPS behind an existing **nginx** install, using a **Cloudflare origin certificate** for TLS — the same HTTPS setup your other apps already use.
+Complete guide for running **R2 Storage instances natively on a Linux VPS** behind an existing **nginx** install, using a **Cloudflare origin certificate** for TLS — no Docker required.
+
+## Two ways to run it
+
+**A. One instance per project** — each project gets its own isolated instance (own service, port, data dir, backups, and domain). Several can share one VPS:
+
+```bash
+INSTANCE=project1 BASE_DOMAIN=project1.com   PORT=4000 ./deploy.sh
+INSTANCE=project2 BASE_DOMAIN=project2.com   PORT=4001 ./deploy.sh
+```
+
+**B. One shared instance for all projects** — a single instance behind `cdn.yourdomain.com`, with one bucket per project:
+
+```bash
+BASE_DOMAIN=yourdomain.com ./deploy.sh       # serves cdn./panel./*.yourdomain.com
+```
+
+Pick A when a project needs its own domain, its own admin, or independent upgrades/backups. Pick B for the cheapest single-box option. You can mix both on the same VPS.
+
+> **Why per-project instances use their own domain:** a Cloudflare origin certificate covers the **apex + exactly one wildcard level** (`yourdomain.com` + `*.yourdomain.com`). So `cdn.project1.com` works, but `cdn.project1.example.com` is *not* covered by a cert for `example.com` + `*.example.com`. Give each project instance its own root domain and the shared wildcard keeps working. The single shared instance (pattern B) needs just the one zone cert.
 
 ---
 
@@ -11,10 +30,16 @@ Complete guide for putting R2 Storage Platform on a production VPS behind an exi
 | Linux VPS | Ubuntu 22.04/24.04, Debian 12 | Node + nginx host |
 | Node.js 20 LTS | via NodeSource | Runtime for the backend, build tooling for the frontend |
 | nginx | already installed | Reverse proxy + TLS termination (your existing setup) |
-| A domain | `ahmedadil.me` | DNS + TLS + custom domain serving |
+| A domain | `ahmedadil.me` (or one per project) | DNS + TLS + custom domain serving |
 | Cloudflare | any free plan | DNS + proxy + the origin certificate you already use |
 
-**Storage is entirely on the VPS disk.** Object blobs live in `STORAGE_DIR` and the SQLite metadata database next to it, both under `/var/lib/r2storage`. That folder is the *only* thing you need to back up.
+**Storage is entirely on the VPS disk.** Object blobs live in the instance's `STORAGE_DIR` and the SQLite metadata database next to it, both under the instance data dir (default `/var/lib/<INSTANCE>`). That folder is the *only* thing you need to back up — per instance.
+
+### Sizing / co-location
+
+- A single instance idles at a few hundred MB of RAM and near-zero CPU — a **1 vCPU / 2 GB / 40 GB** slice easily runs one instance (pattern B, or pattern A for one project).
+- Each additional instance adds ~150–300 MB RAM idle plus **its own stored-bytes disk and transfer**. Rough guide: a 2 vCPU / 8 GB box comfortably runs 3–5 project instances; go up when disk (stored data) or bandwidth becomes the constraint.
+- Ports: first instance uses `4000`, the next `4001`, etc. All bind to `127.0.0.1` only.
 
 ---
 
@@ -23,32 +48,36 @@ Complete guide for putting R2 Storage Platform on a production VPS behind an exi
 ```
 Cloudflare (proxied, SSL/TLS = Full strict)
    │
-   ├─ https://cdn.ahmedadil.me     → nginx:443 ─┐
-   ├─ https://panel.ahmedadil.me   → nginx:443 ─┼─→ 127.0.0.1:4000  (r2storage backend)
-   └─ https://<bucket>.ahmedadil.me → nginx:443 ┘
+   ├─ https://cdn.project1.com       → nginx:443 ─┐
+   ├─ https://panel.project1.com     → nginx:443 ─┼─→ 127.0.0.1:4000  (instance "project1")
+   └─ https://<bucket>.project1.com  → nginx:443 ┘
+   │
+   ├─ https://cdn.project2.com       → nginx:443 ─┐
+   └─ https://panel.project2.com     → nginx:443 ─┼─→ 127.0.0.1:4001  (instance "project2")
+                                                   ┘
 ```
 
-- The backend binds **`127.0.0.1:4000`** only (not publicly reachable).
-- nginx terminates TLS with your **Cloudflare origin certificate** and proxies to the backend.
-- No Caddy, no Docker, no Let's Encrypt — this reuses exactly what your VPS already does for other apps.
+- Each instance binds **`127.0.0.1:<PORT>`** only (never publicly reachable).
+- nginx terminates TLS with your **Cloudflare origin certificate** and proxies by Host header to the right loopback port.
+- Every instance is its own systemd service, env file, data dir, and nginx site config — fully independent.
 
 ---
 
 ## 3. One-time Cloudflare setup
 
-1. **Origin certificate**: SSL/TLS → Origin Server → Create Certificate. Select the zone and make sure it covers **`ahmedadil.me` + `*.ahmedadil.me`** (one cert can cover the zone + subdomains), so `cdn.`, `panel.`, and future bucket subdomains all work without re-issuing.
-2. **Install the cert on the VPS** (the files you already drop in for your other apps):
+1. **Origin certificate**: SSL/TLS → Origin Server → Create Certificate. Select the zone and make sure it covers **`<domain>` + `*.<domain>`** (one cert covers the zone + one subdomain level), so `cdn.`, `panel.`, and future bucket subdomains all work without re-issuing. Create one per project domain if you run pattern A.
+2. **Install the cert on the VPS**:
    ```bash
    mkdir -p /etc/ssl/cloudflare
-   # paste certificate -> /etc/ssl/cloudflare/ahmedadil.me.pem
-   # paste private key -> /etc/ssl/cloudflare/ahmedadil.me.key
-   chmod 600 /etc/ssl/cloudflare/ahmedadil.me.key
+   # paste certificate -> /etc/ssl/cloudflare/<domain>.pem
+   # paste private key -> /etc/ssl/cloudflare/<domain>.key
+   chmod 600 /etc/ssl/cloudflare/<domain>.key
    ```
-   (If your existing origin cert is named differently, just edit the paths in `/etc/nginx/sites-available/r2storage`.)
+   (If your origin cert is named differently, edit the paths in the instance's nginx site config.)
 3. **DNS records** (proxied / orange cloud):
    ```
-   cdn.ahmedadil.me    A  203.0.113.10
-   panel.ahmedadil.me  A  203.0.113.10
+   cdn.<domain>    A  203.0.113.10
+   panel.<domain>  A  203.0.113.10
    ```
    A **CNAME cannot point at an IP** — use `A` records.
 4. **SSL/TLS mode → Full (strict)** — works because the origin cert is Cloudflare-issued.
@@ -60,27 +89,38 @@ Cloudflare (proxied, SSL/TLS = Full strict)
 ### Option A — One-click script (recommended)
 
 ```bash
-apt update && apt install -y curl openssl
+apt update && apt install -y curl openssl rsync
 git clone <your-repo-url> r2storage && cd r2storage
 chmod +x deploy.sh
-BASE_DOMAIN=ahmedadil.me ./deploy.sh
+BASE_DOMAIN=ahmedadil.me ./deploy.sh          # one shared instance (pattern B)
+```
+
+Or per-project instances on the same box (pattern A):
+
+```bash
+INSTANCE=project1 BASE_DOMAIN=project1.com PORT=4000 ./deploy.sh
+INSTANCE=project2 BASE_DOMAIN=project2.com PORT=4001 ./deploy.sh
 ```
 
 Optional flags (after a successful deploy):
 
 ```bash
 ./deploy.sh --smoke     # run the full smoke suite against a throwaway instance
-./deploy.sh --backups   # install the daily backup cron (see § 10)
+./deploy.sh --backups   # install the daily backup cron for this instance
 ```
 
-What it does:
+What it does (per instance):
 
 1. Installs Node 20 (NodeSource) if missing.
-2. Copies the app to `/opt/r2storage`, installs deps, builds backend + frontend, and copies the frontend build into `backend/dist/public`.
-3. Creates the `r2storage` user and `/var/lib/r2storage`.
-4. Writes `/etc/r2storage/env` with `HOST=127.0.0.1`, `PORT=4000`, `DATABASE_URL`, `STORAGE_DIR`, `BASE_DOMAIN`, and a generated `ADMIN_SECRET` (printed once, persisted for redeploys; `chmod 600`).
-5. Installs `deploy/r2storage.service` (systemd) and starts it.
-6. Installs the nginx site (`deploy/nginx-r2storage.conf`, with `__DOMAIN__` replaced by your `BASE_DOMAIN`), runs `nginx -t`, and reloads nginx.
+2. Copies the app to `/opt/<INSTANCE>`, installs deps, builds backend + frontend, and copies the frontend build into `backend/dist/public`.
+3. Creates the `<INSTANCE>` user and `/var/lib/<INSTANCE>`.
+4. Writes `/etc/<INSTANCE>/env` with `HOST=127.0.0.1`, `PORT=<PORT>`, `DATABASE_URL`, `STORAGE_DIR`, `BASE_DOMAIN`, and a generated `ADMIN_SECRET` (printed once, persisted for redeploys; `chmod 600`).
+5. Renders `deploy/r2storage.service` → `/etc/systemd/system/<INSTANCE>.service` and starts it.
+6. Waits for `http://127.0.0.1:<PORT>/health`.
+7. Renders `deploy/nginx-r2storage.conf` (substituting `__DOMAIN__` and `__PORT__`) → `/etc/nginx/sites-available/<INSTANCE>`, runs `nginx -t`, and reloads nginx.
+8. With `--backups`: installs a per-instance cron (`deploy/backup-cron.sh`).
+
+Re-running the same `INSTANCE` upgrades in place and keeps the same `ADMIN_SECRET`, port, and data.
 
 ### Option B — Manual
 
@@ -88,27 +128,32 @@ What it does:
 # 1. Node 20
 curl -fsSL https://deb.nodesource.com/setup_20.x | bash && apt install -y nodejs
 
-# 2. Build
-cd /opt/r2storage/backend && npm install && npm run build
-cd /opt/r2storage/frontend && npm install && npm run build
-mkdir -p /opt/r2storage/backend/dist/public && cp -R /opt/r2storage/frontend/dist/. /opt/r2storage/backend/dist/public/
+# 2. Build (once per instance)
+INSTANCE=project1
+cd /opt/$INSTANCE/backend && npm install && npm run build
+cd /opt/$INSTANCE/frontend && npm install && npm run build
+mkdir -p /opt/$INSTANCE/backend/dist/public && cp -R /opt/$INSTANCE/frontend/dist/. /opt/$INSTANCE/backend/dist/public/
 
 # 3. Data + user
-useradd --system --home /opt/r2storage --shell /usr/sbin/nologin r2storage
-mkdir -p /var/lib/r2storage/storage_blobs
-chown -R r2storage:r2storage /opt/r2storage/backend /var/lib/r2storage
+useradd --system --home /opt/$INSTANCE --shell /usr/sbin/nologin $INSTANCE
+mkdir -p /var/lib/$INSTANCE/storage_blobs
+chown -R $INSTANCE:$INSTANCE /opt/$INSTANCE/backend /var/lib/$INSTANCE
 
-# 4. Env file (/etc/r2storage/env, chmod 600)
-printf 'PORT=4000\nHOST=127.0.0.1\nDATABASE_URL=file:/var/lib/r2storage/storage.db\nSTORAGE_DIR=/var/lib/r2storage/storage_blobs\nADMIN_SECRET=%s\nBASE_DOMAIN=ahmedadil.me\n' "$(openssl rand -hex 32)" | tee /etc/r2storage/env && chmod 600 /etc/r2storage/env
+# 4. Env file (/etc/$INSTANCE/env, chmod 600)
+printf 'PORT=4000\nHOST=127.0.0.1\nDATABASE_URL=file:/var/lib/%s/storage.db\nSTORAGE_DIR=/var/lib/%s/storage_blobs\nADMIN_SECRET=%s\nBASE_DOMAIN=project1.com\n' \
+  "$INSTANCE" "$INSTANCE" "$(openssl rand -hex 32)" | tee /etc/$INSTANCE/env && chmod 600 /etc/$INSTANCE/env
 
-# 5. systemd
-cp deploy/r2storage.service /etc/systemd/system/r2storage.service
-systemctl daemon-reload && systemctl enable --now r2storage
+# 5. systemd (render the template)
+sed -e "s/__INSTANCE__/$INSTANCE/g" -e "s/__USER__/$INSTANCE/g" \
+    -e "s/__DIR__/\/opt\/$INSTANCE/g" -e "s/__ENV__/\/etc\/$INSTANCE\/env/g" \
+    -e "s/__DATA__/\/var\/lib\/$INSTANCE/g" deploy/r2storage.service \
+    > /etc/systemd/system/$INSTANCE.service
+systemctl daemon-reload && systemctl enable --now $INSTANCE
 
-# 6. nginx
-cp deploy/nginx-r2storage.conf /etc/nginx/sites-available/r2storage
-sed -i 's/__DOMAIN__/ahmedadil.me/g' /etc/nginx/sites-available/r2storage
-ln -s /etc/nginx/sites-available/r2storage /etc/nginx/sites-enabled/r2storage
+# 6. nginx (render the site, substitute the domain + port)
+cp deploy/nginx-r2storage.conf /etc/nginx/sites-available/$INSTANCE
+sed -i 's/__DOMAIN__/project1.com/g; s/__PORT__/4000/g' /etc/nginx/sites-available/$INSTANCE
+ln -s /etc/nginx/sites-available/$INSTANCE /etc/nginx/sites-enabled/$INSTANCE
 nginx -t && systemctl reload nginx
 ```
 
@@ -116,23 +161,23 @@ nginx -t && systemctl reload nginx
 
 ## 5. Configuration
 
-Environment file `/etc/r2storage/env`:
+Per-instance env file `/etc/<INSTANCE>/env`:
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `ADMIN_SECRET` | *required* | Unlocks the control panel and `/api/admin/*`. Long random value. |
-| `BASE_DOMAIN` | `ahmedadil.me` | Base domain for `<bucket>.BASE_DOMAIN` public access and nginx `server_name`s. |
+| `ADMIN_SECRET` | *required* | Unlocks the control panel and `/api/admin/*`. Long random value, generated on first deploy. |
+| `BASE_DOMAIN` | `ahmedadil.me` | Root domain for `cdn.` / `panel.` / `<bucket>.BASE_DOMAIN` access. |
 | `PORT` | `4000` | Backend port (loopback only — nginx proxies to it). |
 | `HOST` | `127.0.0.1` | Bind address. Keep loopback; never expose on the internet. |
-| `DATABASE_URL` | `file:/var/lib/r2storage/storage.db` | SQLite database file. |
-| `STORAGE_DIR` | `/var/lib/r2storage/storage_blobs` | Object blob location. |
+| `DATABASE_URL` | `file:/var/lib/<INSTANCE>/storage.db` | SQLite database file. |
+| `STORAGE_DIR` | `/var/lib/<INSTANCE>/storage_blobs` | Object blob location. |
 | `ADMIN_SESSION_TTL_HOURS` | `24` | Dashboard login session lifetime (hours). |
 | `RATE_LIMIT_GLOBAL` | `300` | Baseline requests/min/IP. |
 | `RATE_LIMIT_ADMIN` | `30` | Requests/min/IP on `/api/admin/*` (brute-force guard). |
 | `RATE_LIMIT_S3` | `600` | Requests/min/IP on `/s3/*`. |
 | `LOG_RETENTION_DAYS` | `30` | S3 request-log rows kept before pruning. |
 
-`/var/lib/r2storage` is your **backup unit** (SQLite + all object blobs).
+`/var/lib/<INSTANCE>` is your **backup unit** (SQLite + all object blobs).
 
 ---
 
@@ -145,21 +190,21 @@ ufw allow 443/tcp   # Cloudflare → origin (HTTPS, your origin cert)
 ufw enable
 ```
 
-Port `4000` stays closed to the internet — nginx reaches it on the loopback interface. For extra hardening you can restrict `80`/`443` to Cloudflare's published IP ranges.
+Instance ports (`4000`, `4001`, …) stay closed to the internet — nginx reaches them on the loopback interface. For extra hardening you can restrict `80`/`443` to Cloudflare's published IP ranges.
 
 ---
 
 ## 7. HTTPS & custom domains
 
-The deployed nginx site (`/etc/nginx/sites-available/r2storage`) provides:
+Each instance's nginx site (`/etc/nginx/sites-available/<INSTANCE>`) provides:
 
 | Hostname | Purpose |
 | --- | --- |
-| `cdn.ahmedadil.me` | Object CDN: `https://cdn.ahmedadil.me/<key>` |
-| `* .ahmedadil.me` | Subdomain-style buckets: `https://<bucket>.ahmedadil.me/<key>` |
-| `panel.ahmedadil.me` | Admin control panel (dashboard + `/api/admin`) |
+| `cdn.<BASE_DOMAIN>` | Object CDN: `https://cdn.<domain>/<key>` |
+| `* .<BASE_DOMAIN>` | Subdomain-style buckets: `https://<bucket>.<domain>/<key>` |
+| `panel.<BASE_DOMAIN>` | Admin control panel (dashboard + `/api/admin`) |
 
-Both blocks proxy to `127.0.0.1:4000`, forward the original `Host` and `X-Forwarded-Proto`, and redirect `http` → `https`. The wildcard won't shadow your other apps — nginx always prefers a specific `server_name`.
+All three blocks proxy to `127.0.0.1:<PORT>` (the upstream is keyed by port — `r2storage_backend_<PORT>` — so multiple instance configs coexist without nginx upstream-name collisions), forward the original `Host` and `X-Forwarded-Proto`, and redirect `http` → `https`. The wildcard won't shadow your other apps — nginx always prefers a specific `server_name`.
 
 The two forwarding headers are **required**:
 
@@ -168,7 +213,7 @@ The two forwarding headers are **required**:
 
 The shipped config also includes production streaming + hardening settings:
 
-- `upstream r2storage_backend` with `keepalive 16` + `proxy_http_version 1.1` / `Connection ""` (HTTP keep-alive to the backend).
+- `upstream r2storage_backend_<PORT>` with `keepalive 16` + `proxy_http_version 1.1` / `Connection ""` (HTTP keep-alive to the backend).
 - `proxy_request_buffering off` + `proxy_buffering off` — objects stream straight through nginx to the client with no temp-file double-write.
 - `proxy_next_upstream off` — a dropped upload is not silently replayed.
 - Timeouts (`connect 10s`, `read/send 600s`) for slow/large transfers.
@@ -177,15 +222,15 @@ The shipped config also includes production streaming + hardening settings:
 
 ### Mapping a domain to a bucket
 
-1. Open the control panel at `https://panel.ahmedadil.me`, log in with `ADMIN_SECRET`.
+1. Open the control panel at `https://panel.<domain>`, log in with the instance's `ADMIN_SECRET`.
 2. **Buckets → create/edit a bucket → Public = on.**
 3. **Custom Domains → Add Custom Domain** → enter the domain, pick the bucket.
 
 Once mapped, objects are publicly streamable at:
 
 ```
-https://cdn.ahmedadil.me/<key>
-https://<bucket>.ahmedadil.me/<key>
+https://cdn.<domain>/<key>
+https://<bucket>.<domain>/<key>
 ```
 
 Missing objects / private buckets return `404` / `403` (not the dashboard). Adding a *new* CDN subdomain later = add one `server_name` to the nginx site (or it's already covered by the wildcard) + a DNS record + a domain mapping; then `nginx -t && systemctl reload nginx`.
@@ -222,59 +267,59 @@ Applied automatically by the backend (no configuration needed). The backend runs
 
 ## 10. Backups
 
-Everything lives in `/var/lib/r2storage`:
+Everything for an instance lives in `/var/lib/<INSTANCE>`:
 
 ```bash
 # one-liner tar backup (database is SQLite — consistent enough for a hot backup)
-tar czf r2storage-backup-$(date +%F).tar.gz /var/lib/r2storage
+tar czf r2storage-$(date +%F).tar.gz /var/lib/<INSTANCE>
 
 # or rsync to another machine
-rsync -avz --delete /var/lib/r2storage/ backup-host:/backups/r2storage/
+rsync -avz --delete /var/lib/<INSTANCE>/ backup-host:/backups/r2storage/<INSTANCE>/
 ```
 
 Schedule with cron (`crontab -e`):
 
 ```
-0 3 * * * tar czf /backups/r2storage-$(date +%F).tar.gz /var/lib/r2storage && \
+0 3 * * * tar czf /backups/r2storage-$(date +%F).tar.gz /var/lib/<INSTANCE> && \
   find /backups -name 'r2storage-*' -mtime +14 -delete
 ```
 
-Or install the bundled job (same thing, idempotent):
+Or install the bundled job — **per instance**, so co-located instances each get their own backup script and cron line (same thing, idempotent):
 
 ```bash
-sudo bash deploy/backup-cron.sh /var/lib/r2storage   # or: ./deploy.sh --backups
+sudo bash deploy/backup-cron.sh /var/lib/<INSTANCE> <INSTANCE>   # or: ./deploy.sh --backups
 ```
 
-> A single VPS disk has no redundancy. Restore = extract the archive to the same path, then `systemctl restart r2storage`.
+> A single VPS disk has no redundancy. Restore = extract the archive to the same path, then `systemctl restart <INSTANCE>`.
 
 ---
 
 ## 11. Upgrading
 
 ```bash
-cd /opt/r2storage
+cd /opt/<INSTANCE>
 git pull
 cd backend && npm install && npm run build
 cd ../frontend && npm install && npm run build
 mkdir -p ../backend/dist/public && cp -R dist/. ../backend/dist/public/
-systemctl restart r2storage
+systemctl restart <INSTANCE>
 ```
 
-The SQLite schema is applied automatically on service start (`ExecStartPre: npx prisma db push`). No code changes needed in nginx. Back up `/var/lib/r2storage` first.
+Or simply re-run `./deploy.sh` with the same `INSTANCE` (upgrades in place, keeps secrets/data). The SQLite schema is applied automatically on service start (`ExecStartPre: npx prisma db push`). No code changes needed in nginx. Back up `/var/lib/<INSTANCE>` first.
 
 ---
 
 ## 12. Security hardening checklist
 
-- [ ] `ADMIN_SECRET` is long and random (script generates 64 hex chars) and lives only in `/etc/r2storage/env` (root-only, `chmod 600`).
+- [ ] `ADMIN_SECRET` is long and random (script generates 64 hex chars) and lives only in `/etc/<INSTANCE>/env` (root-only, `chmod 600`).
 - [ ] Dashboard login uses the session cookie: `curl -I https://panel.…/api/admin/session` returns `{"authenticated":false}`, and `POST /api/admin/login` sets an `HttpOnly; SameSite=strict` cookie; the secret header still works for scripts.
-- [ ] Backend binds `127.0.0.1:4000`; port `4000` is not open on the firewall.
+- [ ] Backend binds `127.0.0.1:<PORT>`; the instance port is not open on the firewall.
 - [ ] HTTPS works on all public hosts via the Cloudflare origin cert; Cloudflare SSL/TLS = **Full (strict)**.
 - [ ] `80`/`443` are restricted to Cloudflare's IP ranges so `CF-Connecting-IP` (used for rate limiting) can't be spoofed.
-- [ ] `systemd-analyze security r2storage` reports `NoNewPrivileges`, `ProtectSystem`, `ProtectHome`, and friends are on (the shipped unit sets them; the backend's *only* write paths are `/opt/r2storage/backend` and `/var/lib/r2storage`).
+- [ ] `systemd-analyze security <INSTANCE>` reports `NoNewPrivileges`, `ProtectSystem`, `ProtectHome`, and friends are on (the unit sets them; the backend's *only* write paths are `/opt/<INSTANCE>/backend` and `/var/lib/<INSTANCE>`).
 - [ ] Access keys use least privilege (`READ_ONLY` for downloads, `WRITE_ONLY` for uploads) plus a `bucketFilter` where possible.
 - [ ] Only buckets you actually want world-readable are set **Public**.
-- [ ] `deploy.sh` is run from the repo root; `.env` / `/etc/r2storage/env` secrets are never committed.
+- [ ] `deploy.sh` is run from the repo root; env secrets are never committed.
 - [ ] Backups run on a schedule and are stored off-box.
 - [ ] Confirm rate limiting responds `429` after ~30 failed admin logins (`curl -I https://panel.…/api/admin/login`).
 - [ ] Confirm `curl -I https://panel.…/api/admin/overview` shows `Strict-Transport-Security` / `X-Content-Type-Options` and **no** `Access-Control-Allow-Origin`.
@@ -286,9 +331,10 @@ The SQLite schema is applied automatically on service start (`ExecStartPre: npx 
 
 | Symptom | Likely cause / fix |
 | --- | --- |
-| `https://cdn.ahmedadil.me` never resolves / DNS not found | A record missing or not propagated — `dig +short cdn.ahmedadil.me`. |
+| `https://cdn.<domain>` never resolves / DNS not found | A record missing or not propagated — `dig +short cdn.<domain>`. |
 | Cloudflare 522/525 | Origin (nginx) unreachable or TLS mismatch. Check `systemctl status nginx`, `journalctl -u nginx`; confirm the origin cert paths are right and SSL/TLS mode is **Full (strict)**. |
-| `nginx -t` fails with "cannot load certificate" | Origin cert/key not at `/etc/ssl/cloudflare/ahmedadil.me.{pem,key}` — fix the paths in the site config or place the files. |
+| `nginx -t` fails with "cannot load certificate" | Origin cert/key not at `/etc/ssl/cloudflare/<domain>.{pem,key}` — fix the paths in the site config or place the files. |
+| `nginx -t` fails with "upstream ... is already defined" | Two instance configs used the same `__PORT__` (the upstream is keyed by port). Give each instance a distinct `PORT`. |
 | `nginx -t` warns `"listen ... http2" directive is deprecated` | Harmless on nginx ≥1.25 — the shipped config's `listen ... ssl http2` syntax is for older distros (Ubuntu 22.04's 1.18) and still works. |
 | Dashboard reachable but `https://cdn.…/<key>` returns the dashboard HTML | Domain not mapped in the control panel, or the bucket is private. Map it and set the bucket Public. |
 | `InvalidAccessKeyId` / `SignatureDoesNotMatch` | Wrong endpoint path (must end in `/s3`), wrong region (use `us-east-1`), or wrong secret. See `API.md` § 1–3. |
@@ -297,7 +343,7 @@ The SQLite schema is applied automatically on service start (`ExecStartPre: npx 
 | Storage full / writes fail | VPS disk full — check `df -h`; run section 10 backups. |
 | Dashboard logs me out during a session | Session expired (`ADMIN_SESSION_TTL_HOURS`, default 24h) or revoked server-side (restart/redeploy doesn't clear it — logout or expiry does). Log in again. |
 | `Session cookie` isn't set on `POST /api/admin/login` | The cookie is only set on success, and only sent over HTTPS in production (`NODE_ENV=production`). Over plain HTTP the cookie is still usable in dev. |
-| App won't start / logs empty | `journalctl -u r2storage -e`; confirm `/etc/r2storage/env` exists and is `chmod 600`, and `/var/lib/r2storage` is writable by `r2storage`. |
+| App won't start / logs empty | `journalctl -u <INSTANCE> -e`; confirm `/etc/<INSTANCE>/env` exists and is `chmod 600`, and `/var/lib/<INSTANCE>` is writable by the service user. |
 
 ---
 
