@@ -5,6 +5,9 @@ export type PlanDef = {
   priceMonthlyCents: number;
   storageBytesLimit: bigint;
   bandwidthBytesLimit: bigint;
+  // Stripe product/price ids. Leave empty until you've created matching products
+  // on your Stripe account; checkout then reports "billing not configured" and
+  // the platform keeps running metering-only.
   stripeProductId?: string;
   stripePriceId?: string;
 };
@@ -25,6 +28,8 @@ export const PLANS: PlanDef[] = [
     priceMonthlyCents: 1000,
     storageBytesLimit: 100n * 1024n ** 3n,
     bandwidthBytesLimit: 1024n ** 4n,
+    // e.g. 'price_1...' — set after creating the subscription price in Stripe.
+    stripePriceId: process.env.STRIPE_PRICE_PRO || '',
   },
 ];
 

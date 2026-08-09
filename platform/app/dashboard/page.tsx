@@ -5,7 +5,8 @@ import { ENV } from '@/lib/env';
 import { requireCustomer } from '@/lib/session';
 import { instanceToPublic, cfHostnameStatus } from '@/lib/provision';
 import { customerUsage } from '@/lib/usage';
-import { InstanceControls, ProvisionForm } from './controls';
+import { isStripeConfigured } from '@/lib/stripe';
+import { InstanceControls, ProvisionForm, BillingCard } from './controls';
 
 export const dynamic = 'force-dynamic';
 
@@ -27,6 +28,7 @@ export default async function DashboardPage() {
   }
 
   const customer = await db.customer.findUniqueOrThrow({ where: { id: customerId } });
+  const plan = await db.plan.findUniqueOrThrow({ where: { id: customer.planId } });
   const instances = await db.instance.findMany({
     where: { customerId },
     orderBy: { createdAt: 'desc' },
@@ -49,6 +51,14 @@ export default async function DashboardPage() {
       <p className="muted">
         Signed in as {customer.email} — plan: <strong>{customer.planId}</strong>.
       </p>
+
+      <BillingCard
+        planId={customer.planId}
+        planName={plan.name}
+        priceMonthlyCents={plan.priceMonthlyCents}
+        stripeStatus={customer.stripeSubscriptionStatus}
+        billingConfigured={isStripeConfigured()}
+      />
 
       {!active && (
         <div className="card">

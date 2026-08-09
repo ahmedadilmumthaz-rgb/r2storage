@@ -105,3 +105,74 @@ export function ProvisionForm() {
     </form>
   );
 }
+
+export function BillingCard({
+  planId,
+  planName,
+  priceMonthlyCents,
+  stripeStatus,
+  billingConfigured,
+}: {
+  planId: string;
+  planName: string;
+  priceMonthlyCents: number;
+  stripeStatus: string | null;
+  billingConfigured: boolean;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+
+  const hasActiveSub = stripeStatus === 'active' || stripeStatus === 'trialing';
+
+  async function go(endpoint: string, body?: Record<string, string>) {
+    setBusy(true);
+    setError('');
+    try {
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: body ? JSON.stringify(body) : undefined,
+      });
+      const json = await res.json();
+      if (!res.ok) {
+        setError(json.error || 'Billing request failed.');
+        return;
+      }
+      window.location.href = json.url;
+    } catch {
+      setError('Network error.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const price = priceMonthlyCents > 0 ? `$${(priceMonthlyCents / 100).toFixed(0)}/mo` : 'Free';
+
+  return (
+    <div className="card">
+      <h2>Plan &amp; billing</h2>
+      <p className="muted">
+        Current plan: <strong>{planName}</strong> · {price}
+        {hasActiveSub && <span className="pill active" style={{ marginLeft: '0.6rem' }}>{stripeStatus}</span>}
+      </p>
+      {!billingConfigured ? (
+        <p className="muted" style={{ fontSize: '0.85rem' }}>
+          Billing is coming soon — usage is metered and your instance keeps running.
+        </p>
+      ) : hasActiveSub ? (
+        <button className="secondary" disabled={busy} onClick={() => go('/api/billing/portal')}>
+          Manage billing
+        </button>
+      ) : planId === 'free' ? (
+        <button className="primary" disabled={busy} onClick={() => go('/api/billing/checkout', { planId: 'pro' })}>
+          Upgrade to Pro
+        </button>
+      ) : (
+        <button className="secondary" disabled={busy} onClick={() => go('/api/billing/portal')}>
+          Manage billing
+        </button>
+      )}
+      {error && <p className="error">{error}</p>}
+    </div>
+  );
+}

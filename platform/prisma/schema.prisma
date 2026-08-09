@@ -16,6 +16,10 @@ model Customer {
   requestedDomain String? // domain collected at signup, provisioned on verify
   verifiedAt   DateTime?
   verifyToken  String?   @unique
+  stripeCustomerId      String?  @unique // Stripe customer id (billing)
+  stripeSubscriptionId  String?  @unique
+  stripeSubscriptionStatus String? // active | trialing | past_due | canceled | ...
+  stripePriceId         String?  // price the subscription is on
   createdAt    DateTime  @default(now())
   updatedAt    DateTime  @updatedAt
 

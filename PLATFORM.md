@@ -176,6 +176,33 @@ snapshot + plan limits on the customer dashboard and operator console. Trigger
 a poll manually with `POST /api/meter` (needs `METER_KEY`), or leave the
 interval running.
 
+## Billing (Stripe)
+
+Optional — the platform runs **metering-only** with no Stripe keys, and the
+dashboard shows "billing coming soon". To enable paid plans:
+
+1. Create the subscription product + recurring price on Stripe; put the Pro
+   price id in `STRIPE_PRICE_PRO` (and/or `lib/plans.ts` → `stripePriceId`).
+2. Set `STRIPE_SECRET_KEY`. The webhook signing secret: run
+   `stripe listen --forward-to localhost:3000/api/billing/webhook` (test) or
+   add the endpoint on your Stripe dashboard (prod) and copy `whsec_...` into
+   `STRIPE_WEBHOOK_SECRET`.
+3. Seed the plan rows (`npm run db:setup`) so the price ids land in the DB.
+
+Flow: a Free customer hits **Upgrade to Pro** → `POST /api/billing/checkout`
+creates/links a Stripe customer + subscription checkout
+(`lib/stripe.ts`) → the browser redirects to Stripe. On payment,
+`checkout.session.completed` (and `customer.subscription.updated`) call
+`syncSubscription`, which sets the plan + pushes the new storage quota into the
+tenant container via `applyPlanToInstance` (`PATCH /api/admin/quota` — no
+container restart needed). Cancellation (`customer.subscription.deleted`)
+downgrades to Free and lowers the quota. Existing subscribers manage the plan
+via the Stripe billing portal (`POST /api/billing/portal`).
+
+Checkout is refused (409) when the customer already has an active subscription
+— plan changes go through the portal. Billing endpoints return 501 whenever
+Stripe is unconfigured, so the rest of the platform keeps working.
+
 ## Backups
 
 Back up the platform DB (`DATABASE_URL` file), the tenant volumes

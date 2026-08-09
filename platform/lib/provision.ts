@@ -181,6 +181,25 @@ export async function provisionInstance(customerId: string, domain: string, plan
   }
 }
 
+export async function applyPlanToInstance(customerId: string): Promise<void> {
+  // Push a customer's (possibly changed) plan storage limit into their tenant
+  // container. Runtime PATCH wins over the boot-time STORAGE_QUOTA_BYTES env,
+  // so no container restart is needed. Skipped for non-active instances.
+  const inst = await db.instance.findFirst({
+    where: { customerId, status: 'active' },
+    include: { plan: true },
+  });
+  if (!inst) return;
+  try {
+    await tenantApi(inst.port, decryptSecret(inst.adminSecretEnc), '/api/admin/quota', {
+      method: 'PATCH',
+      body: JSON.stringify({ storageBytesLimit: Number(inst.plan.storageBytesLimit) }),
+    });
+  } catch (e) {
+    console.error(`[billing] quota sync for instance ${inst.id} failed:`, (e as Error).message);
+  }
+}
+
 export async function suspendInstance(id: string): Promise<void> {
   const inst = await db.instance.findUniqueOrThrow({ where: { id } });
   await docker(['stop', `r2storage-${inst.id}`]).catch(() => {});

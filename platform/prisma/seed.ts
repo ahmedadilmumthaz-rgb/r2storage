@@ -13,6 +13,8 @@ async function main() {
         priceMonthlyCents: p.priceMonthlyCents,
         storageBytesLimit: p.storageBytesLimit,
         bandwidthBytesLimit: p.bandwidthBytesLimit,
+        stripeProductId: p.stripeProductId || null,
+        stripePriceId: p.stripePriceId || null,
       },
       create: {
         id: p.id,
@@ -21,6 +23,8 @@ async function main() {
         priceMonthlyCents: p.priceMonthlyCents,
         storageBytesLimit: p.storageBytesLimit,
         bandwidthBytesLimit: p.bandwidthBytesLimit,
+        stripeProductId: p.stripeProductId || null,
+        stripePriceId: p.stripePriceId || null,
       },
     });
     console.log(`[seed] plan ${p.id}`);

@@ -21,6 +21,12 @@ export const ENV = {
   SMTP_PASS: process.env.SMTP_PASS || '',
   SMTP_FROM: process.env.SMTP_FROM || 'R2 Storage <no-reply@r2platform.com>',
 
+  // Stripe billing. Leave unset for metering-only mode; checkout/portal then
+  // return 501 and the dashboard shows "billing coming soon".
+  STRIPE_SECRET_KEY: process.env.STRIPE_SECRET_KEY || '',
+  STRIPE_WEBHOOK_SECRET: process.env.STRIPE_WEBHOOK_SECRET || '',
+  STRIPE_PRICE_PRO: process.env.STRIPE_PRICE_PRO || '',
+
   NODE_ENV: process.env.NODE_ENV || 'development',
 
   TENANT_STORAGE_BASE: process.env.TENANT_STORAGE_BASE || '/srv/r2storage/tenants',
