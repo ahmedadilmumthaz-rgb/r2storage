@@ -1,0 +1,96 @@
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model Customer {
+  id           String    @id @default(cuid())
+  email        String    @unique
+  name         String
+  passwordHash String
+  planId       String
+  requestedDomain String? // domain collected at signup, provisioned on verify
+  verifiedAt   DateTime?
+  verifyToken  String?   @unique
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  plan      Plan       @relation(fields: [planId], references: [id])
+  instances Instance[]
+  invoices  Invoice[]
+}
+
+model Session {
+  id         String   @id @default(cuid())
+  tokenHash  String   @unique // SHA-256 of the random session token; never stored in plaintext
+  customerId String?
+  role       String   @default("customer") // customer | operator
+  createdAt  DateTime @default(now())
+  expiresAt  DateTime
+
+  @@index([expiresAt])
+}
+
+model Plan {
+  id                  String   @id
+  name                String
+  description         String?
+  priceMonthlyCents   Int
+  storageBytesLimit   BigInt
+  bandwidthBytesLimit BigInt
+  stripeProductId     String?
+  stripePriceId       String?
+  customers           Customer[]
+  instances           Instance[]
+}
+
+model Instance {
+  id                 String   @id @default(cuid())
+  customerId         String
+  domain             String   @unique // customer root domain (subdomains route here)
+  port               Int      @unique
+  containerId        String?  @unique
+  adminSecretEnc     String
+  initialKeyIdEnc    String?
+  initialKeySecretEnc String?
+  cfHostnameId       String?  @unique
+  status             String   @default("pending") // pending | active | suspended | deleted
+  planId             String
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  customer      Customer       @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  plan          Plan           @relation(fields: [planId], references: [id])
+  usageSnapshots UsageSnapshot[]
+
+  @@index([customerId])
+}
+
+model UsageSnapshot {
+  id               String   @id @default(cuid())
+  instanceId       String
+  at               DateTime @default(now())
+  storageBytes     BigInt
+  requests         Int
+  bytesTransferred BigInt
+
+  instance Instance @relation(fields: [instanceId], references: [id], onDelete: Cascade)
+
+  @@index([instanceId, at])
+}
+
+model Invoice {
+  id          String   @id @default(cuid())
+  customerId  String
+  periodStart DateTime
+  periodEnd   DateTime
+  totalCents  Int
+  status      String   @default("pending") // pending | paid | void
+  createdAt   DateTime @default(now())
+
+  customer Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+}

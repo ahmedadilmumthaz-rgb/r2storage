@@ -1,0 +1,338 @@
+:root {
+  --bg: #0b0f14;
+  --bg-soft: #101722;
+  --card: #131c2a;
+  --card-2: #182235;
+  --border: #243044;
+  --text: #e6edf7;
+  --text-dim: #93a4bd;
+  --accent: #4f8cff;
+  --accent-soft: rgba(79, 140, 255, 0.12);
+  --green: #37d399;
+  --amber: #f5b84b;
+  --red: #f1665f;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  line-height: 1.55;
+}
+
+a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+a:hover {
+  text-decoration: underline;
+}
+
+/* --- layout ----------------------------------------------------------- */
+.nav {
+  display: flex;
+  align-items: center;
+  gap: 1.5rem;
+  padding: 0.9rem 1.5rem;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-soft);
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+
+.nav .brand {
+  font-weight: 700;
+  font-size: 1.05rem;
+  color: var(--text);
+}
+
+.nav .spacer {
+  flex: 1;
+}
+
+.nav a {
+  color: var(--text-dim);
+  font-size: 0.92rem;
+}
+
+.nav a:hover {
+  color: var(--text);
+  text-decoration: none;
+}
+
+.container {
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 2rem 1.25rem 4rem;
+}
+
+/* --- cards ------------------------------------------------------------- */
+.card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 1.5rem;
+  margin-bottom: 1.25rem;
+}
+
+.card h2 {
+  margin-top: 0;
+}
+
+/* --- hero / landing ------------------------------------------------------ */
+.hero {
+  text-align: center;
+  padding: 3.5rem 1rem 2.5rem;
+}
+
+.hero h1 {
+  font-size: 2.4rem;
+  line-height: 1.2;
+  margin: 0 0 0.75rem;
+}
+
+.hero p {
+  color: var(--text-dim);
+  font-size: 1.1rem;
+  max-width: 560px;
+  margin: 0 auto 1.75rem;
+}
+
+.cta-row {
+  display: flex;
+  gap: 0.75rem;
+  justify-content: center;
+  flex-wrap: wrap;
+}
+
+/* --- forms --------------------------------------------------------------- */
+label {
+  display: block;
+  font-size: 0.85rem;
+  color: var(--text-dim);
+  margin-bottom: 0.35rem;
+}
+
+input[type="text"],
+input[type="email"],
+input[type="password"],
+select {
+  width: 100%;
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 0.6rem 0.75rem;
+  font-size: 0.95rem;
+  margin-bottom: 1rem;
+}
+
+input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+button,
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: 8px;
+  padding: 0.6rem 1.1rem;
+  font-size: 0.95rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+button:hover,
+.btn:hover {
+  filter: brightness(1.08);
+}
+
+button.secondary,
+.btn.secondary {
+  background: var(--card-2);
+  border: 1px solid var(--border);
+  color: var(--text);
+}
+
+button.danger,
+.btn.danger {
+  background: var(--red);
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.field {
+  margin-bottom: 0.25rem;
+}
+
+.error {
+  color: var(--red);
+  font-size: 0.9rem;
+  margin: 0.5rem 0;
+}
+
+.success {
+  color: var(--green);
+  font-size: 0.9rem;
+  margin: 0.5rem 0;
+}
+
+/* --- plan picker ---------------------------------------------------------- */
+.plans {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 1rem;
+  margin-bottom: 1.25rem;
+}
+
+.plan {
+  background: var(--card-2);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 1.1rem 1.25rem;
+  cursor: pointer;
+}
+
+.plan.selected {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.plan .price {
+  font-size: 1.5rem;
+  font-weight: 700;
+  margin: 0.25rem 0;
+}
+
+.plan .desc {
+  color: var(--text-dim);
+  font-size: 0.85rem;
+}
+
+/* --- tables --------------------------------------------------------------- */
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.92rem;
+}
+
+th,
+td {
+  text-align: left;
+  padding: 0.6rem 0.75rem;
+  border-bottom: 1px solid var(--border);
+}
+
+th {
+  color: var(--text-dim);
+  font-weight: 600;
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+/* --- status pills --------------------------------------------------------- */
+.pill {
+  display: inline-block;
+  padding: 0.15rem 0.6rem;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+.pill.active {
+  background: rgba(55, 211, 153, 0.15);
+  color: var(--green);
+}
+
+.pill.pending {
+  background: rgba(245, 184, 75, 0.15);
+  color: var(--amber);
+}
+
+.pill.suspended {
+  background: rgba(241, 102, 95, 0.15);
+  color: var(--red);
+}
+
+.pill.deleted {
+  background: var(--card-2);
+  color: var(--text-dim);
+}
+
+/* --- misc ------------------------------------------------------------------ */
+.mono {
+  font-family: var(--mono);
+  font-size: 0.85rem;
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  padding: 0.6rem 0.8rem;
+  border-radius: 8px;
+  word-break: break-all;
+  display: block;
+}
+
+details {
+  margin-top: 1rem;
+}
+
+summary {
+  cursor: pointer;
+  color: var(--accent);
+  font-size: 0.9rem;
+}
+
+.muted {
+  color: var(--text-dim);
+}
+
+.bar {
+  height: 8px;
+  border-radius: 999px;
+  background: var(--card-2);
+  overflow: hidden;
+  margin: 0.4rem 0 0.1rem;
+}
+
+.bar > div {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--accent);
+}
+
+.bar > div.warn {
+  background: var(--amber);
+}
+
+.grid-2 {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 1.25rem;
+}
+
+ol.steps {
+  padding-left: 1.2rem;
+}
+
+ol.steps li {
+  margin-bottom: 0.6rem;
+}

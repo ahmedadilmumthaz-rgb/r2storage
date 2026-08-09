@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>R2 Storage — direct browser upload</title>
+  <style>
+    body { font-family: sans-serif; max-width: 520px; margin: 4rem auto; padding: 0 1rem; }
+    .ok { color: #16a34a; }
+    .err { color: #dc2626; }
+    pre { background: #f1f5f9; padding: .75rem; border-radius: 8px; overflow: auto; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <h1>Direct browser upload (presigned PUT)</h1>
+  <input type="file" id="file" />
+  <button id="upload" disabled>Upload</button>
+  <p id="status"></p>
+  <pre id="details"></pre>
+
+  <script>
+    const input = document.getElementById("file");
+    const btn = document.getElementById("upload");
+    const status = document.getElementById("status");
+    const details = document.getElementById("details");
+
+    input.addEventListener("change", () => (btn.disabled = !input.files.length));
+
+    btn.addEventListener("click", async () => {
+      const file = input.files[0];
+      if (!file) return;
+      status.textContent = "Requesting presigned URL…";
+      details.textContent = "";
+
+      try {
+        const key = `uploads/${crypto.randomUUID()}-${file.name}`;
+        // 1. Server mints a 15-min presigned PUT for this key.
+        const res = await fetch("/presign-put", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ key, contentType: file.type }),
+        });
+        const { url } = await res.json();
+
+        // 2. Browser PUTs straight to storage — cross-origin, so the bucket's
+        //    corsOrigins must include this page's origin.
+        const up = await fetch(url, {
+          method: "PUT",
+          headers: { "Content-Type": file.type || "application/octet-stream" },
+          body: file,
+        });
+        if (!up.ok) throw new Error(`PUT failed: ${up.status}`);
+        status.className = "ok";
+        status.textContent = "Uploaded successfully to " + key;
+      } catch (err) {
+        status.className = "err";
+        status.textContent = "Upload failed: " + err.message;
+      }
+    });
+  </script>
+</body>
+</html>

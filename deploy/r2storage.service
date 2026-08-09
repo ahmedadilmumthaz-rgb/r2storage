@@ -1,0 +1,36 @@
+[Unit]
+Description=R2 Storage Platform (self-hosted S3/R2 object storage)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=r2storage
+Group=r2storage
+WorkingDirectory=/opt/r2storage/backend
+Environment=NODE_ENV=production
+EnvironmentFile=/etc/r2storage/env
+ExecStartPre=/bin/sh -c 'cd /opt/r2storage/backend && npx prisma db push'
+ExecStart=/usr/bin/node dist/index.js
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+LimitNOFILE=65536
+
+# --- Sandboxing -----------------------------------------------------
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectHome=true
+ProtectSystem=full
+ReadWritePaths=/opt/r2storage/backend /var/lib/r2storage
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

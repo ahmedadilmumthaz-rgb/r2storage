@@ -1,0 +1,16 @@
+# Build context exclusions for the tenant Docker image.
+**/node_modules
+**/dist
+**/.git
+**/.env
+**/*.log
+**/dev.db
+backend/data_storage
+frontend/node_modules
+frontend/dist
+deploy
+platform
+scripts
+examples
+*.md
+.DS_Store

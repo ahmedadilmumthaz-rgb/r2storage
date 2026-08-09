@@ -1,0 +1,112 @@
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model Bucket {
+  id          String   @id @default(uuid())
+  name        String   @unique
+  isPublic    Boolean  @default(false)
+  corsOrigins String   @default("*") // JSON or comma-separated origins
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  objects     Object[]
+}
+
+model Object {
+  id          String   @id @default(uuid())
+  bucketName  String
+  key         String
+  size        Int
+  contentType String   @default("application/octet-stream")
+  etag        String
+  storagePath String
+  metadata    String?  // JSON stringified custom metadata
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  bucket      Bucket   @relation(fields: [bucketName], references: [name], onDelete: Cascade)
+
+  @@unique([bucketName, key])
+  @@index([bucketName])
+}
+
+model AccessKey {
+  id              String   @id @default(uuid())
+  accessKeyId     String   @unique
+  secretAccessKey String
+  name            String
+  permission      String   @default("FULL") // FULL, READ_ONLY, WRITE_ONLY
+  bucketFilter    String?  // null for all buckets, or specific bucket name
+  createdAt       DateTime @default(now())
+}
+
+model AdminSession {
+  id        String   @id @default(uuid())
+  tokenHash String   @unique // SHA-256 of the random session token; never stored in plaintext
+  ip        String?  // client IP from req.ip (CF-Connecting-IP behind nginx)
+  createdAt DateTime @default(now())
+  expiresAt DateTime
+
+  @@index([expiresAt])
+}
+
+model CustomDomain {
+  id         String   @id @default(uuid())
+  domain     String   @unique
+  bucketName String
+  sslStatus  String   @default("ACTIVE") // ACTIVE, PENDING, ERROR
+  createdAt  DateTime @default(now())
+}
+
+model RequestLog {
+  id               String   @id @default(uuid())
+  bucketName       String?
+  method           String
+  path             String
+  status           Int
+  ip               String
+  bytesTransferred Int      @default(0)
+  createdAt        DateTime @default(now())
+}
+
+// Key/value settings (e.g. 'storage_bytes_limit'); lets the SaaS control plane
+// adjust a tenant's limits at runtime without recreating the container.
+model Setting {
+  key       String   @id
+  value     String
+  updatedAt DateTime @updatedAt
+}
+
+model MultipartUpload {
+  id          String   @id @default(uuid())
+  bucketName  String
+  key         String
+  uploadId    String   @unique
+  contentType String   @default("application/octet-stream")
+  parts       MultipartPart[]
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([bucketName, key, uploadId])
+  @@index([uploadId])
+}
+
+model MultipartPart {
+  id          String   @id @default(uuid())
+  uploadId    String
+  partNumber  Int
+  etag        String
+  size        Int
+  storagePath String
+  createdAt   DateTime @default(now())
+
+  upload MultipartUpload @relation(fields: [uploadId], references: [uploadId], onDelete: Cascade)
+
+  @@unique([uploadId, partNumber])
+  @@index([uploadId])
+}

@@ -1,0 +1,9 @@
+# config/storage.yml — add this service, then pick it in production.rb.
+r2storage:
+  service: S3
+  bucket: <%= ENV["R2_BUCKET"] %>
+  endpoint: <%= ENV["R2_ENDPOINT"] %>          # e.g. https://cdn.example.com/s3
+  region: <%= ENV["R2_REGION"] || "us-east-1" %>
+  access_key_id: <%= ENV["R2_ACCESS_KEY_ID"] %>
+  secret_access_key: <%= ENV["R2_SECRET_ACCESS_KEY"] %>
+  force_path_style: true                       # REQUIRED for R2 storage

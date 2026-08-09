@@ -1,0 +1,23 @@
+# Secrets - never commit these
+.env
+
+# Dependencies
+node_modules/
+
+# Build output
+backend/dist/
+frontend/dist/
+platform/.next/
+platform/*.tsbuildinfo
+
+# Local data
+data/
+*.db
+*.db-shm
+*.db-wal
+
+# OS / editor
+.DS_Store
+
+# Local code intelligence index (rebuilt by `codegraph init`)
+.codegraph/

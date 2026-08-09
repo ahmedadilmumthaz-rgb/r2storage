@@ -1,0 +1,31 @@
+{
+  "name": "r2storage-backend",
+  "version": "1.0.0",
+  "description": "Self-hosted S3/R2 compatible object storage engine and API",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "./node_modules/.bin/tsc",
+    "start": "node dist/index.js",
+    "dev": "ts-node-dev --respawn --transpile-only src/index.ts",
+    "db:push": "./node_modules/.bin/prisma db push",
+    "db:generate": "./node_modules/.bin/prisma generate"
+  },
+  "dependencies": {
+    "@fastify/cookie": "^11.1.2",
+    "@fastify/cors": "^10.1.0",
+    "@fastify/helmet": "^12.0.1",
+    "@fastify/multipart": "^9.4.0",
+    "@fastify/rate-limit": "^11.2.0",
+    "@fastify/static": "^10.1.2",
+    "@prisma/client": "^5.10.2",
+    "fastify": "^5.11.2",
+    "mime-types": "^2.1.35"
+  },
+  "devDependencies": {
+    "@types/mime-types": "^2.1.4",
+    "@types/node": "^20.11.20",
+    "prisma": "^5.10.2",
+    "ts-node-dev": "^2.0.0",
+    "typescript": "^5.3.3"
+  }
+}

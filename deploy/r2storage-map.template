@@ -1,0 +1,24 @@
+# R2 Storage multi-tenant host map - GENERATED FILE
+#
+# Written by the control plane (platform/lib/provision.ts) on every
+# provisioning/suspension/removal change, then nginx is reloaded.
+# Included from nginx-multitenant.conf inside the http context.
+#
+# Format: regex keys matching a customer's subdomains map to that tenant's
+# container port; the platform hosts map to the control plane app. Everything
+# else defaults to 0, which the catch-all server turns into a 404.
+#
+# This file is an example/template. Do not hand-edit the live copy.
+
+map $host $r2_tenant_port {
+    default 0;
+
+    # Control plane app (Next.js): panel + origin hosts of the platform zone
+    "~^panel\\.__DOMAIN__$"  4000;
+    "~^origin\\.__DOMAIN__$" 4000;
+
+    # Each customer: any subdomain of their root domain -> their container
+    # e.g. cdn.example.com, panel.example.com, assets.example.com
+    "~^([a-z0-9-]+\\.)+example\\.com$" 41001;
+    "~^([a-z0-9-]+\\.)+acme\\.io$"     41002;
+}

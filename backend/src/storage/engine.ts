@@ -1,0 +1,166 @@
+import fs from 'fs';
+import path from 'path';
+import crypto from 'crypto';
+import { CONFIG } from '../config';
+
+export class StorageEngine {
+  private baseDir: string;
+
+  constructor() {
+    this.baseDir = CONFIG.STORAGE_DIR;
+    if (!fs.existsSync(this.baseDir)) {
+      fs.mkdirSync(this.baseDir, { recursive: true });
+    }
+  }
+
+  private getFilePath(bucketName: string, key: string): string {
+    const safeBucket = bucketName.replace(/[^a-zA-Z0-9._-]/g, '_');
+    const keyHash = crypto.createHash('sha256').update(key).digest('hex');
+    const dir = path.join(this.baseDir, safeBucket, keyHash.slice(0, 2), keyHash.slice(2, 4));
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+    return path.join(dir, keyHash);
+  }
+
+  async saveObject(bucketName: string, key: string, buffer: Buffer): Promise<{ size: number; etag: string; storagePath: string }> {
+    const filePath = this.getFilePath(bucketName, key);
+    await fs.promises.writeFile(filePath, buffer);
+    const md5 = crypto.createHash('md5').update(buffer).digest('hex');
+    return {
+      size: buffer.length,
+      etag: `"${md5}"`,
+      storagePath: filePath,
+    };
+  }
+
+  async saveObjectFromStream(bucketName: string, key: string, stream: NodeJS.ReadableStream): Promise<{ size: number; etag: string; storagePath: string }> {
+    const filePath = this.getFilePath(bucketName, key);
+    const tmpPath = filePath + '.tmp-' + process.pid + '-' + Date.now();
+    const hash = crypto.createHash('md5');
+    let size = 0;
+
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const writeStream = fs.createWriteStream(tmpPath);
+        writeStream.on('finish', () => resolve());
+        writeStream.on('error', reject);
+        stream.on('error', reject);
+        stream.on('data', (chunk: Buffer) => {
+          size += chunk.length;
+          hash.update(chunk);
+        });
+        stream.pipe(writeStream);
+      });
+    } catch (err) {
+      await fs.promises.unlink(tmpPath).catch(() => {});
+      throw err;
+    }
+
+    await fs.promises.rename(tmpPath, filePath);
+    return { size, etag: `"${hash.digest('hex')}"`, storagePath: filePath };
+  }
+
+  private getPartPath(uploadId: string, partNumber: number): string {
+    const dir = path.join(this.baseDir, 'multipart', uploadId);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+    return path.join(dir, String(partNumber));
+  }
+
+  async savePartFromStream(uploadId: string, partNumber: number, stream: NodeJS.ReadableStream): Promise<{ etag: string; size: number; storagePath: string }> {
+    const partPath = this.getPartPath(uploadId, partNumber);
+    const hash = crypto.createHash('md5');
+    let size = 0;
+
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const writeStream = fs.createWriteStream(partPath);
+        writeStream.on('finish', () => resolve());
+        writeStream.on('error', reject);
+        stream.on('error', reject);
+        stream.on('data', (chunk: Buffer) => {
+          size += chunk.length;
+          hash.update(chunk);
+        });
+        stream.pipe(writeStream);
+      });
+    } catch (err) {
+      await fs.promises.unlink(partPath).catch(() => {});
+      throw err;
+    }
+
+    return { etag: `"${hash.digest('hex')}"`, size, storagePath: partPath };
+  }
+
+  async assembleUpload(
+    bucketName: string,
+    key: string,
+    parts: Array<{ storagePath: string; partNumber: number }>
+  ): Promise<{ size: number; etag: string; storagePath: string }> {
+    const filePath = this.getFilePath(bucketName, key);
+    const tmpPath = filePath + '.tmp-' + process.pid + '-' + Date.now();
+    const hash = crypto.createHash('md5');
+    let size = 0;
+
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const writeStream = fs.createWriteStream(tmpPath);
+        writeStream.on('finish', () => resolve());
+        writeStream.on('error', reject);
+        const ordered = [...parts].sort((a, b) => a.partNumber - b.partNumber);
+        (async () => {
+          for (const part of ordered) {
+            const data = await fs.promises.readFile(part.storagePath);
+            size += data.length;
+            hash.update(data);
+            if (!writeStream.write(data)) {
+              await new Promise<void>((res) => writeStream.once('drain', () => res()));
+            }
+          }
+          writeStream.end();
+        })().catch(reject);
+      });
+    } catch (err) {
+      await fs.promises.unlink(tmpPath).catch(() => {});
+      throw err;
+    }
+
+    await fs.promises.rename(tmpPath, filePath);
+    return { size, etag: `"${hash.digest('hex')}"`, storagePath: filePath };
+  }
+
+  async deleteUploadParts(uploadId: string): Promise<void> {
+    const dir = path.join(this.baseDir, 'multipart', uploadId);
+    await fs.promises.rm(dir, { recursive: true, force: true });
+  }
+
+  async getObjectStream(filePath: string): Promise<fs.ReadStream | null> {
+    if (!fs.existsSync(filePath)) {
+      return null;
+    }
+    return fs.createReadStream(filePath);
+  }
+
+  async getObjectBuffer(filePath: string): Promise<Buffer | null> {
+    if (!fs.existsSync(filePath)) {
+      return null;
+    }
+    return await fs.promises.readFile(filePath);
+  }
+
+  async deleteObjectFile(filePath: string): Promise<boolean> {
+    try {
+      if (fs.existsSync(filePath)) {
+        await fs.promises.unlink(filePath);
+        return true;
+      }
+    } catch (err) {
+      console.error('Failed to delete object file:', err);
+    }
+    return false;
+  }
+}
+
+export const storageEngine = new StorageEngine();
