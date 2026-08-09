@@ -1,0 +1,39 @@
+[Unit]
+Description=R2 Storage Platform (Next.js control plane)
+After=network-online.target docker.service
+Wants=network-online.target docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/r2platform
+Environment=NODE_ENV=production
+EnvironmentFile=/etc/r2platform/env
+# Apply schema changes before starting (idempotent; prisma client is built in
+# during `platform-deploy.sh`, so --skip-generate keeps boot fast)
+ExecStartPre=/opt/r2platform/node_modules/.bin/prisma db push --skip-generate
+ExecStart=/opt/r2platform/node_modules/.bin/next start -H 127.0.0.1 -p 4000
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+LimitNOFILE=65536
+
+# Runs as root by design: provisioning talks to the Docker socket, writes the
+# nginx host map, and reloads nginx. Sandboxing below still constrains what it
+# can touch.
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectHome=true
+ProtectSystem=full
+ReadWritePaths=/opt/r2platform /var/lib/r2platform /srv/r2storage/tenants /etc/nginx
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

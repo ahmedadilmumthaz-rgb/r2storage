@@ -206,6 +206,46 @@ Checkout is refused (409) when the customer already has an active subscription
 — plan changes go through the portal. Billing endpoints return 501 whenever
 Stripe is unconfigured, so the rest of the platform keeps working.
 
+## Deploying to a VPS
+
+The control plane runs as a plain systemd service (`next start`) on the
+loopback port **4000** — the same way the single-tenant backend is deployed;
+nginx terminates TLS. It needs root-ish access because provisioning talks to the
+Docker socket, writes the nginx host map, and reloads nginx (the shipped unit
+runs as root with `ProtectSystem=full` and a narrow `ReadWritePaths`).
+
+```bash
+# on the VPS, from the repo root:
+PLATFORM_DOMAIN=r2platform.com \
+OPERATOR_EMAIL=ops@r2platform.com \
+OPERATOR_PASSWORD='a-strong-password' \
+sudo bash deploy/platform-deploy.sh
+```
+
+`deploy/platform-deploy.sh` is idempotent and re-runnable:
+
+1. Ensures Node 20, Docker, and nginx are installed.
+2. Rsyncs the repo to `/opt/r2platform` (excludes `.env`, DBs, `node_modules`).
+3. Builds: `npm ci` → `prisma db push` → `prisma generate` → `tsx prisma/seed.ts`
+   → `next build` (seeds the plans so quotas/Stripe ids exist).
+4. Creates `/var/lib/r2platform` (platform DB) and `TENANT_STORAGE_BASE`
+   (`/srv/r2storage/tenants`).
+5. Writes `/etc/r2platform/env` — all `ENV` vars, secrets generated **once** and
+   persisted for redeploys (`PLATFORM_MASTER_KEY`, `METER_KEY`, operator hash).
+   Edit this file + `systemctl restart r2platform` to add CF/SMTP/Stripe later.
+6. Installs `deploy/r2platform.service` (`ExecStartPre: prisma db push`,
+   `ExecStart: next start -H 127.0.0.1 -p 4000`) and waits on `/api/health`.
+7. Installs the multi-tenant nginx site and writes the initial host map
+   (`panel./origin./www./bare` → 4000; everything else 404).
+8. Builds the tenant image so provisioning works immediately.
+
+Then on your side: Cloudflare origin cert + `panel.`/`origin.` A records,
+SSL for SaaS, `CF_API_TOKEN`/`CF_ZONE_ID`, SMTP, Stripe (see below), and a
+post-deploy run of `scripts/platform-smoke.sh`.
+
+`/api/health` returns `{"ok":true}` (or 503) with a DB ping — used by the
+deploy script and `systemd` health tooling.
+
 ## Backups
 
 Back up the platform DB (`DATABASE_URL` file), the tenant volumes
