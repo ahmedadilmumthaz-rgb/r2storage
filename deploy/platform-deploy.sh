@@ -67,15 +67,16 @@ else
     cp -r ./ "$PLATFORM_DIR/"
 fi
 
-# 3. Install deps, apply schema, seed plans, build
+# 3. Data dirs (before building: `next build` may touch the DB during page data
+#    collection, and SQLite needs the directory to exist)
+echo "🛠  Preparing data directories..."
+mkdir -p "$PLATFORM_DATA" "$TENANT_STORAGE_BASE"
+
+# 4. Install deps, apply schema, seed plans, build
 echo "⚡ Building control plane..."
 (cd "$PLATFORM_DIR/platform" && npm install --no-fund --no-audit)
 export DATABASE_URL="file:${PLATFORM_DATA}/r2platform.db"
 (cd "$PLATFORM_DIR/platform" && npx prisma db push && npx prisma generate && npx tsx prisma/seed.ts && npm run build)
-
-# 4. Data dirs
-echo "🛠  Preparing data directories..."
-mkdir -p "$PLATFORM_DATA" "$TENANT_STORAGE_BASE"
 
 # 5. Operator password hash (only if no hash was supplied/persisted)
 if [ -z "$OPERATOR_PASSWORD_HASH" ]; then
