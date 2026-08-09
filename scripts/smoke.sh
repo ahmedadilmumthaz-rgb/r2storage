@@ -135,6 +135,27 @@ AK="$(json_field "$R" accessKeyId)"
 check "create scoped access key" "201" "$KEY_CODE"
 [ -n "$AK" ] || { echo "✗ could not parse access key"; exit 1; }
 
+# --- storage quota ---------------------------------------------------------------
+echo "== storage quota =="
+R=$(curl -s -H "X-Admin-Secret: $ADMIN_SECRET" "$B/api/admin/quota")
+check "quota defaults to unlimited" "0" "$(json_field "$R" storageBytesLimit)"
+check "quota rejects negative limit" "400" "$(status_of -H "X-Admin-Secret: $ADMIN_SECRET" -X PATCH -H "Content-Type: application/json" -d '{"storageBytesLimit":-5}' "$B/api/admin/quota")"
+check "quota set to 50B" "200" "$(status_of -H "X-Admin-Secret: $ADMIN_SECRET" -X PATCH -H "Content-Type: application/json" -d '{"storageBytesLimit":50}' "$B/api/admin/quota")"
+
+head -c 100 /dev/zero > "$TMP/big.bin"
+check "over-quota PUT -> 507" "507" "$(status_of -X PUT -H "x-access-key-id: $AK" --data-binary @"$TMP/big.bin" "$B/s3/smoke/overq.bin")"
+check "rejected object not committed (HEAD 404)" "404" "$(status_of -I -H "x-access-key-id: $AK" "$B/s3/smoke/overq.bin")"
+R=$(curl -s -H "X-Admin-Secret: $ADMIN_SECRET" "$B/api/admin/usage")
+check "usage unchanged after 507" "0" "$(json_field "$R" storageBytes)"
+
+check "under-quota PUT -> 200" "200" "$(status_of -X PUT -H "x-access-key-id: $AK" --data-binary 'under-quota' "$B/s3/smoke/underq.bin")"
+curl -s -o /dev/null -H "x-access-key-id: $AK" -X DELETE "$B/s3/smoke/underq.bin"
+rm -f "$TMP/big.bin"
+
+curl -s -o /dev/null -H "X-Admin-Secret: $ADMIN_SECRET" -X PATCH -H "Content-Type: application/json" -d '{"storageBytesLimit":0}' "$B/api/admin/quota"
+R=$(curl -s -H "X-Admin-Secret: $ADMIN_SECRET" "$B/api/admin/quota")
+check "quota restored to unlimited" "0" "$(json_field "$R" storageBytesLimit)"
+
 # --- S3 object operations -------------------------------------------------------
 echo "== S3 PUT/GET/HEAD/list =="
 printf 'smoke-test-content' > "$TMP/hello.txt"
