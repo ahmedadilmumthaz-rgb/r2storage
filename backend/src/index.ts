@@ -14,6 +14,7 @@ import { s3Routes } from './api/s3';
 import { publicDomainRoutes, tryServePublicObject } from './api/public';
 import { startMaintenanceSweeper } from './maintenance';
 import { db, initDatabase } from './db';
+import { isAdminIpAllowed } from './auth/allowlist';
 
 const fastify = Fastify({
   logger: true,
@@ -72,6 +73,16 @@ async function start() {
       }
     });
     await fastify.register(rateLimit, { max: CONFIG.RATE_LIMIT_GLOBAL, timeWindow: '1 minute' });
+
+    // Optional admin IP allowlist — registered at the root so it covers the
+    // login route too (authRoutes is a separate plugin), gating /api/admin/*
+    // before any auth or lockout logic runs.
+    fastify.addHook('preHandler', async (req, reply) => {
+      if (!req.url.startsWith('/api/admin')) return;
+      if (!isAdminIpAllowed(req.ip)) {
+        return reply.status(403).send({ error: 'Admin API is restricted to allowed networks.' });
+      }
+    });
 
     // Stream raw bodies (S3 PUT / multipart parts / XML) to disk instead of buffering
     fastify.addContentTypeParser('application/octet-stream', { bodyLimit: 10 * 1024 * 1024 * 1024 }, (req, payload, done) => done(null, payload));

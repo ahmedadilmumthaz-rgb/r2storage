@@ -38,7 +38,7 @@ platform/         Next.js SaaS control plane (signup, provisioning, metering, St
   lib/               provision.ts, nginx.ts, usage.ts, stripe.ts, session.ts, ...
 deploy/           baremetal nginx/systemd templates + SaaS VPS installer
 deploy.sh         parameterized baremetal installer (INSTANCE/PORT/BASE_DOMAIN)
-scripts/          smoke.sh (backend, 61 checks), platform-smoke.sh, sec-check.sh
+scripts/          smoke.sh (backend, 65 checks), platform-smoke.sh, sec-check.sh
 examples/         integration recipes (browser-upload, nextjs-uploader, laravel, ...)
 ```
 
@@ -47,7 +47,7 @@ examples/         integration recipes (browser-upload, nextjs-uploader, laravel,
 ```bash
 npm install --prefix backend && npm install --prefix frontend   # deps
 npm run build            # tsc backend + vite frontend
-npm test                 # scripts/smoke.sh — boots a throwaway backend, 61 checks
+npm test                 # scripts/smoke.sh — boots a throwaway backend, 65 checks
 npm run test:platform    # platform E2E smoke (needs a running platform first)
 npm run lint --prefix platform    # eslint (platform only; backend/frontend have no lint)
 bash scripts/sec-check.sh         # ad-hoc security spot-checks (spins a temp server)
@@ -106,7 +106,9 @@ explicit, reviewed reason.**
 6. **Server config.** CORS is disabled globally (`origin: false`); only object
    routes set `Access-Control-Allow-Origin`. `@fastify/helmet` headers are on.
    Rate limits key off the client IP and are per-scope (admin 30/min,
-   s3 600/min, global 300/min).
+   s3 600/min, global 300/min). Optional `ADMIN_ALLOWED_CIDRS` gates the whole
+   admin API — login included — at the root (`allowlist.ts`), keyed off the same
+   client IP.
 7. **Deployment.** Keep the backend loopback-only in systemd (deploy.sh already
    renders `HOST=127.0.0.1`); TLS is always terminated at nginx with a Cloudflare
    origin cert; `deploy/r2storage.service` ships with sandboxing options.

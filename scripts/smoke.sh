@@ -330,6 +330,39 @@ check "renewal cannot extend past the cap" "true" "$(node -e "process.stdout.wri
 check "session still authenticated under cap" "true" "$(curl -s -b "$COOKIES3" "$B2/api/admin/session" | node -e "const d=JSON.parse(require('fs').readFileSync(0));process.stdout.write(String(d.authenticated))")"
 kill "$SERVER2_PID" 2>/dev/null; wait "$SERVER2_PID" 2>/dev/null
 
+# --- admin IP allowlist (third throwaway boot, allowlist enabled) ---------------
+# Boots with ADMIN_ALLOWED_CIDRS=127.0.0.1/32: the real client (loopback) passes,
+# but a spoofed X-Forwarded-For lands outside the allowlist and is denied 403 —
+# including on the login route, which runs before any auth logic.
+echo "== admin IP allowlist =="
+PORT3=$((PORT + 2))
+DB3="$TMP/allow.db"
+STORE3="$TMP/store3"
+LOG3="$TMP/server3.log"
+mkdir -p "$STORE3"
+(
+  cd "$BACKEND"
+  DATABASE_URL="file:$DB3" npx prisma db push >/dev/null 2>&1
+)
+(
+  cd "$BACKEND"
+  exec env PORT="$PORT3" HOST=127.0.0.1 DATABASE_URL="file:$DB3" STORAGE_DIR="$STORE3" \
+    ADMIN_SECRET="$ADMIN_SECRET" BASE_DOMAIN=localhost NODE_ENV=production \
+    ADMIN_ALLOWED_CIDRS=127.0.0.1/32 \
+    node dist/index.js >"$LOG3" 2>&1
+) &
+SERVER3_PID=$!
+B3="http://127.0.0.1:$PORT3"
+for _ in $(seq 1 50); do
+  curl -sf "$B3/health" >/dev/null 2>&1 && break
+  sleep 0.2
+done
+check "allowlist: real IP reaches overview -> 200" "200" "$(status_of -H "X-Admin-Secret: $ADMIN_SECRET" "$B3/api/admin/overview")"
+check "allowlist: spoofed IP overview -> 403" "403" "$(status_of -H "X-Forwarded-For: 8.8.8.8" -H "X-Admin-Secret: $ADMIN_SECRET" "$B3/api/admin/overview")"
+check "allowlist: login gated too -> 403" "403" "$(status_of -H "X-Forwarded-For: 8.8.8.8" -X POST -H "Content-Type: application/json" -d "{\"secret\":\"$ADMIN_SECRET\"}" "$B3/api/admin/login")"
+check "allowlist: real IP can still log in -> 200" "200" "$(status_of -X POST -H "Content-Type: application/json" -d "{\"secret\":\"$ADMIN_SECRET\"}" "$B3/api/admin/login")"
+kill "$SERVER3_PID" 2>/dev/null; wait "$SERVER3_PID" 2>/dev/null
+
 # --- summary ----------------------------------------------------------------------
 echo
 echo "== smoke result: $PASS passed, $FAIL failed =="

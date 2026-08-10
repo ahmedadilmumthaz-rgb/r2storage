@@ -12,6 +12,9 @@ export const CONFIG = {
   STORAGE_DIR: process.env.STORAGE_DIR || path.join(process.cwd(), 'data_storage'),
   ADMIN_SECRET: process.env.ADMIN_SECRET || 'r2storage-admin-secret-key-change-me',
   BASE_DOMAIN: process.env.BASE_DOMAIN || 'localhost',
+  // Optional comma-separated CIDRs (IPv4/IPv6) that may reach /api/admin/*
+  // including login; empty = allow all. Enforced via req.ip (CF-Connecting-IP).
+  ADMIN_ALLOWED_CIDRS: process.env.ADMIN_ALLOWED_CIDRS || '',
   RATE_LIMIT_GLOBAL: parseInt(process.env.RATE_LIMIT_GLOBAL || '300', 10),
   RATE_LIMIT_ADMIN: parseInt(process.env.RATE_LIMIT_ADMIN || '30', 10),
   RATE_LIMIT_S3: parseInt(process.env.RATE_LIMIT_S3 || '600', 10),
