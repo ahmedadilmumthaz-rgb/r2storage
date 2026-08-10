@@ -15,6 +15,7 @@ import { publicDomainRoutes, tryServePublicObject } from './api/public';
 import { startMaintenanceSweeper } from './maintenance';
 import { db, initDatabase } from './db';
 import { isAdminIpAllowed } from './auth/allowlist';
+import { encKey } from './storage/crypto';
 
 const fastify = Fastify({
   logger: true,
@@ -142,6 +143,10 @@ async function start() {
       }
       console.warn('[WARNING] Using the default ADMIN_SECRET. Set a strong ADMIN_SECRET env var before public deployment.');
     }
+
+    // Fail fast on a malformed STORAGE_ENCRYPTION_KEY (would silently produce
+    // undecryptable blobs otherwise). encKey() exits on invalid input.
+    encKey();
 
     // Ensure database connection + SQLite WAL/busy_timeout tuning
     await db.$connect();

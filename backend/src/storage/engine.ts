@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
 import { CONFIG } from '../config';
+import { EncryptedWrite, openEncryptedRead, encryptionEnabled, maybeDecryptBuffer, maybeEncryptBuffer } from './crypto';
 
 export class StorageEngine {
   private baseDir: string;
@@ -25,7 +26,9 @@ export class StorageEngine {
 
   async saveObject(bucketName: string, key: string, buffer: Buffer): Promise<{ size: number; etag: string; storagePath: string }> {
     const filePath = this.getFilePath(bucketName, key);
-    await fs.promises.writeFile(filePath, buffer);
+    // Encrypt at rest when a key is configured; the ETag stays the MD5 of the
+    // *plaintext* so it matches what S3 clients compute from the payload.
+    await fs.promises.writeFile(filePath, maybeEncryptBuffer(buffer));
     const md5 = crypto.createHash('md5').update(buffer).digest('hex');
     return {
       size: buffer.length,
@@ -46,11 +49,22 @@ export class StorageEngine {
         writeStream.on('finish', () => resolve());
         writeStream.on('error', reject);
         stream.on('error', reject);
-        stream.on('data', (chunk: Buffer) => {
-          size += chunk.length;
-          hash.update(chunk);
-        });
-        stream.pipe(writeStream);
+        if (encryptionEnabled()) {
+          // Hash plaintext chunks before encryption so the ETag matches the payload.
+          const ew = new EncryptedWrite(writeStream);
+          stream.on('data', (chunk: Buffer) => {
+            size += chunk.length;
+            hash.update(chunk);
+            ew.write(chunk);
+          });
+          stream.on('end', () => ew.end());
+        } else {
+          stream.on('data', (chunk: Buffer) => {
+            size += chunk.length;
+            hash.update(chunk);
+          });
+          stream.pipe(writeStream);
+        }
       });
     } catch (err) {
       await fs.promises.unlink(tmpPath).catch(() => {});
@@ -80,11 +94,21 @@ export class StorageEngine {
         writeStream.on('finish', () => resolve());
         writeStream.on('error', reject);
         stream.on('error', reject);
-        stream.on('data', (chunk: Buffer) => {
-          size += chunk.length;
-          hash.update(chunk);
-        });
-        stream.pipe(writeStream);
+        if (encryptionEnabled()) {
+          const ew = new EncryptedWrite(writeStream);
+          stream.on('data', (chunk: Buffer) => {
+            size += chunk.length;
+            hash.update(chunk);
+            ew.write(chunk);
+          });
+          stream.on('end', () => ew.end());
+        } else {
+          stream.on('data', (chunk: Buffer) => {
+            size += chunk.length;
+            hash.update(chunk);
+          });
+          stream.pipe(writeStream);
+        }
       });
     } catch (err) {
       await fs.promises.unlink(partPath).catch(() => {});
@@ -109,17 +133,20 @@ export class StorageEngine {
         const writeStream = fs.createWriteStream(tmpPath);
         writeStream.on('finish', () => resolve());
         writeStream.on('error', reject);
+        const ew = new EncryptedWrite(writeStream); // passthrough when disabled
         const ordered = [...parts].sort((a, b) => a.partNumber - b.partNumber);
         (async () => {
           for (const part of ordered) {
-            const data = await fs.promises.readFile(part.storagePath);
+            // Parts are stored encrypted too; decrypt back to plaintext before
+            // re-encrypting into the assembled object (or hashing, if disabled).
+            const data = maybeDecryptBuffer(await fs.promises.readFile(part.storagePath));
             size += data.length;
             hash.update(data);
-            if (!writeStream.write(data)) {
+            if (!ew.write(data)) {
               await new Promise<void>((res) => writeStream.once('drain', () => res()));
             }
           }
-          writeStream.end();
+          ew.end();
         })().catch(reject);
       });
     } catch (err) {
@@ -136,18 +163,20 @@ export class StorageEngine {
     await fs.promises.rm(dir, { recursive: true, force: true });
   }
 
-  async getObjectStream(filePath: string): Promise<fs.ReadStream | null> {
+  async getObjectStream(filePath: string): Promise<NodeJS.ReadableStream | null> {
     if (!fs.existsSync(filePath)) {
       return null;
     }
-    return fs.createReadStream(filePath);
+    // Decrypt when the blob carries the encryption magic; plaintext (legacy or
+    // key-less) blobs stream through untouched.
+    return openEncryptedRead(filePath) ?? fs.createReadStream(filePath);
   }
 
   async getObjectBuffer(filePath: string): Promise<Buffer | null> {
     if (!fs.existsSync(filePath)) {
       return null;
     }
-    return await fs.promises.readFile(filePath);
+    return maybeDecryptBuffer(await fs.promises.readFile(filePath));
   }
 
   async deleteObjectFile(filePath: string): Promise<boolean> {

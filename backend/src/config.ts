@@ -10,6 +10,10 @@ export const CONFIG = {
   HOST: process.env.HOST || '127.0.0.1',
   DATABASE_URL: process.env.DATABASE_URL || 'file:./dev.db',
   STORAGE_DIR: process.env.STORAGE_DIR || path.join(process.cwd(), 'data_storage'),
+  // Optional AES-256-GCM blob encryption key (64 hex chars = 32 bytes). Empty =
+  // plaintext blobs (backward compatible). When set, every new blob is encrypted
+  // at rest with a per-object random IV; existing plaintext blobs stay readable.
+  STORAGE_ENCRYPTION_KEY: process.env.STORAGE_ENCRYPTION_KEY || '',
   ADMIN_SECRET: process.env.ADMIN_SECRET || 'r2storage-admin-secret-key-change-me',
   BASE_DOMAIN: process.env.BASE_DOMAIN || 'localhost',
   // Optional comma-separated CIDRs (IPv4/IPv6) that may reach /api/admin/*

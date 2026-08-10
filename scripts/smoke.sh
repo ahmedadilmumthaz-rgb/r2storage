@@ -25,6 +25,9 @@ fi
 
 PORT="${SMOKE_PORT:-4199}"
 ADMIN_SECRET="${ADMIN_SECRET:-smoke-test-secret}"
+# 32-byte key (64 hex chars); smoke boots WITH encryption at rest so the whole
+# suite exercises encrypt-write / decrypt-read on every object path.
+ENC_KEY="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 SMOKE_URL="${SMOKE_URL:-}"
 
 TMP="$(mktemp -d /tmp/r2-smoke.XXXXXX)"
@@ -89,6 +92,7 @@ echo "== booting throwaway instance on :$PORT =="
   cd "$BACKEND"
   exec env PORT="$PORT" HOST=127.0.0.1 DATABASE_URL="file:$DB" STORAGE_DIR="$STORE" \
     ADMIN_SECRET="$ADMIN_SECRET" BASE_DOMAIN=localhost NODE_ENV=production \
+    STORAGE_ENCRYPTION_KEY="$ENC_KEY" \
     LOGIN_FAIL_THRESHOLD=3 LOGIN_GLOBAL_THRESHOLD=5 LOGIN_IP_COOLDOWN_SEC=60 \
     LOGIN_GLOBAL_COOLDOWN_SEC=60 LOGIN_FAILURE_DELAY_MS=1 \
     ADMIN_SESSION_TTL_HOURS=0.01 \
@@ -201,6 +205,12 @@ check "GET object content" "smoke-test-content" "$R"
 check "HEAD object" "200" "$(status_of -I -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" "$B/s3/smoke/hello.txt")"
 check "ListObjects" "200" "$(status_of -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" "$B/s3/smoke")"
 
+# Encryption at rest: with STORAGE_ENCRYPTION_KEY set, the blob on disk must
+# start with the r2enc1 magic and must not contain the plaintext payload.
+ENCFILE="$(find "$STORE/smoke" -type f | head -1)"
+check "stored blob is encrypted (r2enc1 magic)" "7232656e6331" "$(head -c 6 "$ENCFILE" | xxd -p)"
+check "stored blob hides plaintext" "0" "$(grep -c 'smoke-test-content' "$ENCFILE" 2>/dev/null || true)"
+
 # --- auth hardening -------------------------------------------------------------
 echo "== auth hardening =="
 check "bare access key id (no secret) rejected" "403" "$(status_of -H "x-access-key-id: $AK" "$B/s3/smoke/hello.txt")"
@@ -236,6 +246,10 @@ COMPLETE_XML="<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>$ET
 curl -s -o /dev/null -X POST -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" -H "Content-Type: application/xml" --data "$COMPLETE_XML" "$B/s3/smoke/big.bin?uploadId=$UPLOAD_ID"
 R=$(curl -s -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" "$B/s3/smoke/big.bin")
 check "multipart assembled" "part-onepart-two" "$R"
+# The assembled object must also be encrypted on disk (multipart parts decrypt
+# and re-encrypt during assembly). Check the magic of every stored blob.
+ALLENC="$(find "$STORE/smoke" -type f | while read -r f; do head -c 6 "$f" | xxd -p; done | sort -u)"
+check "all stored blobs encrypted on disk" "7232656e6331" "$ALLENC"
 
 # --- presigned + public bucket ----------------------------------------------------
 echo "== presigned URL + public bucket =="
