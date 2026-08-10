@@ -38,7 +38,7 @@ platform/         Next.js SaaS control plane (signup, provisioning, metering, St
   lib/               provision.ts, nginx.ts, usage.ts, stripe.ts, session.ts, ...
 deploy/           baremetal nginx/systemd templates + SaaS VPS installer
 deploy.sh         parameterized baremetal installer (INSTANCE/PORT/BASE_DOMAIN)
-scripts/          smoke.sh (backend, 50 checks), platform-smoke.sh, sec-check.sh
+scripts/          smoke.sh (backend, 57 checks), platform-smoke.sh, sec-check.sh
 examples/         integration recipes (browser-upload, nextjs-uploader, laravel, ...)
 ```
 
@@ -47,7 +47,7 @@ examples/         integration recipes (browser-upload, nextjs-uploader, laravel,
 ```bash
 npm install --prefix backend && npm install --prefix frontend   # deps
 npm run build            # tsc backend + vite frontend
-npm test                 # scripts/smoke.sh — boots a throwaway backend, 50 checks
+npm test                 # scripts/smoke.sh — boots a throwaway backend, 57 checks
 npm run test:platform    # platform E2E smoke (needs a running platform first)
 npm run lint --prefix platform    # eslint (platform only; backend/frontend have no lint)
 bash scripts/sec-check.sh         # ad-hoc security spot-checks (spins a temp server)
@@ -94,8 +94,10 @@ explicit, reviewed reason.**
     `SameSite=Strict` cookies, revoked on logout and expired by maintenance.
     Wrong-secret logins are throttled by an escalating lockout (`lockout.ts`:
     per-IP block + doubling global cooldown, capped) and written to a
-    `FailedLogin` audit table — extend `scripts/smoke.sh` / `sec-check.sh` when
-    touching this behavior.
+    `FailedLogin` audit table; privileged admin actions land in an `AuditLog`
+    table (`audit.ts`, surfaced at `GET /api/admin/audit`) with the auth source
+    recorded. Extend `scripts/smoke.sh` / `sec-check.sh` when touching this
+    behavior.
 5. **Object storage.** Blobs are stored under sha256-derived paths — a key can
    never traverse directories. Quota is enforced pre-write (Content-Length) and
    post-write (HTTP 507). XML responses escape all interpolated values.

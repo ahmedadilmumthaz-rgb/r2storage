@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { HardDrive, FolderArchive, Key, Globe, Activity, ShieldCheck, ArrowUpRight, AlertTriangle } from 'lucide-react';
+import { HardDrive, FolderArchive, Key, Globe, Activity, ShieldCheck, ArrowUpRight, AlertTriangle, History } from 'lucide-react';
 import { adminFetch } from '../api';
 
 interface OverviewData {
@@ -8,6 +8,7 @@ interface OverviewData {
   totalStorageBytes: number;
   accessKeysCount: number;
   customDomainsCount: number;
+  failedLogins24h: number;
   recentLogs: Array<{
     id: string;
     bucketName?: string;
@@ -20,6 +21,16 @@ interface OverviewData {
   }>;
 }
 
+interface AuditEntry {
+  id: number;
+  actor: string;
+  ip: string;
+  action: string;
+  target?: string | null;
+  detail?: string | null;
+  createdAt: string;
+}
+
 interface QuotaData {
   storageBytesLimit: number; // 0 = unlimited
   storageBytes: number;
@@ -28,16 +39,19 @@ interface QuotaData {
 export const OverviewTab: React.FC<{ onNavigate: (tab: string) => void }> = ({ onNavigate }) => {
   const [data, setData] = useState<OverviewData | null>(null);
   const [quota, setQuota] = useState<QuotaData | null>(null);
+  const [audit, setAudit] = useState<AuditEntry[]>([]);
   const [loading, setLoading] = useState(true);
 
   const fetchOverview = async () => {
     try {
-      const [overview, quotaRes] = await Promise.all([
+      const [overview, quotaRes, auditRes] = await Promise.all([
         adminFetch('/api/admin/overview'),
         adminFetch('/api/admin/quota'),
+        adminFetch('/api/admin/audit?limit=25'),
       ]);
       setData(await overview.json());
       setQuota(await quotaRes.json());
+      setAudit(await auditRes.json());
     } catch (err) {
       console.error('Failed to fetch overview stats', err);
     } finally {
@@ -220,6 +234,79 @@ export const OverviewTab: React.FC<{ onNavigate: (tab: string) => void }> = ({ o
                 <tr>
                   <td colSpan={6} className="py-8 text-center text-slate-500 text-xs">
                     No requests recorded yet. Upload or request files via S3 API or public link.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+      {/* Admin Activity / Audit Trail */}
+      <div className="glass-panel p-6 rounded-2xl space-y-4">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <History className="w-5 h-5 text-brand-500" />
+            <h3 className="text-lg font-semibold text-white">Admin Activity (Audit Trail)</h3>
+          </div>
+          {data && data.failedLogins24h > 0 && (
+            <span className="flex items-center gap-1.5 text-rose-400 text-xs bg-rose-500/10 border border-rose-500/30 px-3 py-1 rounded-full">
+              <AlertTriangle className="w-3.5 h-3.5" />
+              {data.failedLogins24h} failed login{data.failedLogins24h === 1 ? '' : 's'} in the last 24h
+            </span>
+          )}
+        </div>
+
+        <div className="overflow-x-auto">
+          <table className="w-full text-left text-sm">
+            <thead>
+              <tr className="border-b border-slate-800 text-slate-400 text-xs uppercase font-medium">
+                <th className="pb-3 px-2">Action</th>
+                <th className="pb-3 px-2">Target</th>
+                <th className="pb-3 px-2">Via</th>
+                <th className="pb-3 px-2">Client IP</th>
+                <th className="pb-3 px-2 text-right">Time</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-800/60">
+              {audit.length > 0 ? (
+                audit.map((entry) => (
+                  <tr key={entry.id} className="hover:bg-slate-800/30 transition">
+                    <td className="py-3 px-2">
+                      <span
+                        className={`px-2 py-0.5 rounded font-mono text-xs font-semibold ${
+                          entry.action.endsWith('.delete')
+                            ? 'bg-rose-500/10 text-rose-400'
+                            : entry.action.endsWith('.update')
+                            ? 'bg-amber-500/10 text-amber-400'
+                            : entry.action.startsWith('login.')
+                            ? 'bg-blue-500/10 text-blue-400'
+                            : 'bg-emerald-500/10 text-emerald-400'
+                        }`}
+                      >
+                        {entry.action}
+                      </span>
+                    </td>
+                    <td className="py-3 px-2 text-slate-300 font-mono text-xs">{entry.target || '—'}</td>
+                    <td className="py-3 px-2">
+                      <span
+                        className={`px-2 py-0.5 rounded text-xs font-medium ${
+                          entry.actor === 'session' ? 'bg-slate-700/40 text-slate-300' : 'bg-slate-800 text-slate-500'
+                        }`}
+                        title={entry.actor === 'session' ? 'Dashboard session' : entry.actor === 'header' ? 'x-admin-secret script' : 'Auth lifecycle'}
+                      >
+                        {entry.actor}
+                      </span>
+                    </td>
+                    <td className="py-3 px-2 text-slate-400 font-mono text-xs">{entry.ip}</td>
+                    <td className="py-3 px-2 text-slate-400 text-right text-xs">
+                      {new Date(entry.createdAt).toLocaleString()}
+                    </td>
+                  </tr>
+                ))
+              ) : (
+                <tr>
+                  <td colSpan={5} className="py-8 text-center text-slate-500 text-xs">
+                    No admin actions recorded yet. Bucket, key, and quota changes appear here.
                   </td>
                 </tr>
               )}

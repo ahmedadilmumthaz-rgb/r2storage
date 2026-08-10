@@ -396,6 +396,7 @@ All endpoints require `X-Admin-Secret`. JSON in/out. Errors are `{"error": "..."
 | GET | `/api/admin/domains` | List mapped domains |
 | POST | `/api/admin/domains` | Map `{domain, bucketName}` |
 | DELETE | `/api/admin/domains/:id` | Remove mapping |
+| GET | `/api/admin/audit?limit=` | Admin audit trail (newest first): `[{actor, ip, userAgent, action, target, detail, createdAt}]`. `actor` = `session` (dashboard), `header` (x-admin-secret script), or `system` (login/logout). `limit` capped at 200 (default 50). Every bucket/key/domain/quota mutation is recorded here along with `login.success`/`logout`. |
 
 ### 6.5 Example: full lifecycle with curl
 

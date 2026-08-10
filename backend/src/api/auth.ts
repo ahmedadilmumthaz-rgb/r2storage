@@ -3,6 +3,7 @@ import { CONFIG } from '../config';
 import { secretsEqual } from '../auth/secrets';
 import { SESSION_COOKIE, createSession, destroySession, isValidSession, sessionCookieOptions } from '../auth/session';
 import { isLockedOut, recordFailure, resetLockout } from '../auth/lockout';
+import { auditLog } from '../auth/audit';
 import { db } from '../db';
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -43,12 +44,14 @@ export async function authRoutes(fastify: FastifyInstance) {
 
     resetLockout(req.ip);
     const token = await createSession(req.ip);
+    auditLog(req, 'login.success', null, null, 'system');
     reply.setCookie(SESSION_COOKIE, token, sessionCookieOptions());
     return { ok: true };
   });
 
   fastify.post('/api/admin/logout', async (req: FastifyRequest, reply) => {
     await destroySession((req.cookies || {})[SESSION_COOKIE]);
+    auditLog(req, 'logout', null, null, 'system');
     reply.clearCookie(SESSION_COOKIE, { path: '/' });
     return { ok: true };
   });

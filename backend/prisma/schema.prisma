@@ -93,6 +93,23 @@ model FailedLogin {
   @@index([createdAt])
 }
 
+// Audit trail for privileged admin actions (bucket/key/domain/quota changes,
+// auth events). `actor` records the auth source (session = dashboard cookie,
+// header = x-admin-secret script, system = login/logout lifecycle). Rows are
+// pruned by the maintenance sweeper after LOG_RETENTION_DAYS.
+model AuditLog {
+  id        Int      @id @default(autoincrement())
+  actor     String
+  ip        String
+  userAgent String?
+  action    String // e.g. 'bucket.create', 'key.delete', 'quota.update', 'login.success'
+  target    String? // subject of the action (bucket name, key id, ...)
+  detail    String? // JSON string of extra context (permissions, filters, limits, ...)
+  createdAt DateTime @default(now())
+
+  @@index([createdAt])
+}
+
 model MultipartUpload {
   id          String   @id @default(uuid())
   bucketName  String

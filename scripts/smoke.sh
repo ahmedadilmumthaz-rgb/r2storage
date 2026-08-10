@@ -160,6 +160,22 @@ curl -s -o /dev/null -H "X-Admin-Secret: $ADMIN_SECRET" -X PATCH -H "Content-Typ
 R=$(curl -s -H "X-Admin-Secret: $ADMIN_SECRET" "$B/api/admin/quota")
 check "quota restored to unlimited" "0" "$(json_field "$R" storageBytesLimit)"
 
+# --- admin audit trail ---------------------------------------------------------
+echo "== admin audit trail =="
+check "audit log requires auth" "401" "$(status_of "$B/api/admin/audit")"
+AUDIT="$(curl -s -b "$COOKIES" "$B/api/admin/audit")"
+# bucket.create was done via the dashboard cookie -> actor 'session'
+check "audit records bucket.create (actor=session)" "session" "$(printf '%s' "$AUDIT" | node -e "const d=JSON.parse(require('fs').readFileSync(0));const e=d.find(x=>x.action==='bucket.create'&&x.target==='smoke');process.stdout.write(e?e.actor:'MISSING')")"
+# two access keys were created via the cookie
+check "audit records both key.create rows" "2" "$(printf '%s' "$AUDIT" | node -e "const d=JSON.parse(require('fs').readFileSync(0));process.stdout.write(String(d.filter(x=>x.action==='key.create').length))")"
+# quota was patched via the x-admin-secret header -> actor 'header', detail carries the limit
+check "audit records quota.update (actor=header)" "header" "$(printf '%s' "$AUDIT" | node -e "const d=JSON.parse(require('fs').readFileSync(0));const e=d.find(x=>x.action==='quota.update');process.stdout.write(e?e.actor:'MISSING')")"
+# the 50B quota set earlier must appear in the trail (the later restore-to-0 row
+# is also present, so count rows whose detail carries the 50B limit)
+check "quota.update detail records limit" "1" "$(printf '%s' "$AUDIT" | node -e "const d=JSON.parse(require('fs').readFileSync(0));process.stdout.write(String(d.filter(x=>x.action==='quota.update'&&x.detail&&JSON.parse(x.detail).storageBytesLimit===50).length))")"
+check "audit records login.success" "system" "$(printf '%s' "$AUDIT" | node -e "const d=JSON.parse(require('fs').readFileSync(0));const e=d.find(x=>x.action==='login.success');process.stdout.write(e?e.actor:'MISSING')")"
+check "audit bad limit falls back to default" "true" "$(curl -s -b "$COOKIES" "$B/api/admin/audit?limit=abc" | node -e "const d=JSON.parse(require('fs').readFileSync(0));process.stdout.write(Array.isArray(d)&&d.length<=200?'true':'false')")"
+
 # --- S3 object operations -------------------------------------------------------
 echo "== S3 PUT/GET/HEAD/list =="
 printf 'smoke-test-content' > "$TMP/hello.txt"

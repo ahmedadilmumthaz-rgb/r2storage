@@ -28,5 +28,10 @@ echo "login bad #2 (locks IP):   $(curl -s -o /dev/null -w '%{http_code}' -H "X-
 echo "login correct -> locked:   $(curl -s -o /dev/null -w '%{http_code}' -H "X-Forwarded-For: 9.9.9.9" -X POST -H "Content-Type: application/json" -d '{"secret":"test-secret-123"}' "$B/api/admin/login")"
 echo "retry-after header:        $(curl -s -D - -o /dev/null -H "X-Forwarded-For: 9.9.9.9" -X POST -H "Content-Type: application/json" -d '{"secret":"test-secret-123"}' "$B/api/admin/login" | grep -i '^retry-after:' | tr -d '\r' || echo 'MISSING')"
 echo "header auth per-IP count:  $(curl -s -o /dev/null -w '%{http_code}' -H "X-Forwarded-For: 9.9.9.9" -H "X-Admin-Secret: wrong" "$B/api/admin/overview")"
+
+# --- admin audit trail -----------------------------------------------------------
+echo "audit: bucket.create actor: $(curl -s -H "X-Admin-Secret: test-secret-123" "$B/api/admin/audit" | node -e "const d=JSON.parse(require('fs').readFileSync(0));const e=d.find(x=>x.action==='bucket.create');process.stdout.write(e?e.actor:'MISSING')")"
+echo "audit: key.create rows:     $(curl -s -H "X-Admin-Secret: test-secret-123" "$B/api/admin/audit" | node -e "const d=JSON.parse(require('fs').readFileSync(0));process.stdout.write(String(d.filter(x=>x.action==='key.create').length))")"
+echo "audit: unauthenticated:     $(curl -s -o /dev/null -w '%{http_code}' "$B/api/admin/audit")"
 kill "$SPID" 2>/dev/null; wait "$SPID" 2>/dev/null
 rm -rf "$TMP"

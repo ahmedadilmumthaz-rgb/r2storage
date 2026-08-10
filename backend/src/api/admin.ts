@@ -7,6 +7,7 @@ import { secretsEqual } from '../auth/secrets';
 import { SESSION_COOKIE, isValidSession } from '../auth/session';
 import { getStorageQuota, setStorageQuota, usedStorageBytes, wouldExceedQuota } from '../quota';
 import { isLockedOut, recordFailure } from '../auth/lockout';
+import { auditLog } from '../auth/audit';
 import mime from 'mime-types';
 import crypto from 'crypto';
 
@@ -23,10 +24,16 @@ export async function adminRoutes(fastify: FastifyInstance) {
       req.url.startsWith('/api/admin/session');
     if (isPublicAdminRoute) return;
 
-    if (await isValidSession((req.cookies || {})[SESSION_COOKIE])) return;
+    if (await isValidSession((req.cookies || {})[SESSION_COOKIE])) {
+      req.adminActor = 'session';
+      return;
+    }
 
     const provided = req.headers['x-admin-secret'];
-    if (typeof provided === 'string' && secretsEqual(provided, CONFIG.ADMIN_SECRET)) return;
+    if (typeof provided === 'string' && secretsEqual(provided, CONFIG.ADMIN_SECRET)) {
+      req.adminActor = 'header';
+      return;
+    }
 
     // A wrong x-admin-secret is brute-forcing the same shared secret, so count
     // it toward the caller's per-IP lockout — but NOT the global tier, so a
@@ -123,6 +130,7 @@ export async function adminRoutes(fastify: FastifyInstance) {
       },
     });
 
+    auditLog(req, 'bucket.create', name, { isPublic: isPublic ?? false });
     return reply.status(201).send(bucket);
   });
 
@@ -138,6 +146,10 @@ export async function adminRoutes(fastify: FastifyInstance) {
       },
     });
 
+    auditLog(req, 'bucket.update', name, {
+      ...(isPublic !== undefined ? { isPublic } : {}),
+      ...(corsOrigins !== undefined ? { corsOrigins } : {}),
+    });
     return updated;
   });
 
@@ -151,6 +163,7 @@ export async function adminRoutes(fastify: FastifyInstance) {
     }
 
     await db.bucket.delete({ where: { name } });
+    auditLog(req, 'bucket.delete', name);
     return { success: true, message: `Bucket ${name} deleted successfully` };
   });
 
@@ -202,6 +215,7 @@ export async function adminRoutes(fastify: FastifyInstance) {
       },
     });
 
+    auditLog(req, 'object.upload', `${name}/${key}`, { size });
     return reply.status(201).send(objectRecord);
   });
 
@@ -219,6 +233,7 @@ export async function adminRoutes(fastify: FastifyInstance) {
       await db.object.delete({ where: { id: obj.id } });
     }
 
+    auditLog(req, 'object.delete', `${name}/${key}`);
     return { success: true };
   });
 
@@ -283,12 +298,14 @@ export async function adminRoutes(fastify: FastifyInstance) {
       },
     });
 
+    auditLog(req, 'key.create', key.id, { name: key.name, permission: key.permission, bucketFilter: key.bucketFilter });
     return reply.status(201).send(key);
   });
 
   fastify.delete('/api/admin/keys/:id', async (req, reply) => {
     const { id } = req.params as { id: string };
     await db.accessKey.delete({ where: { id } });
+    auditLog(req, 'key.delete', id);
     return { success: true };
   });
 
@@ -314,12 +331,14 @@ export async function adminRoutes(fastify: FastifyInstance) {
       },
     });
 
+    auditLog(req, 'domain.create', newDomain.domain, { bucketName });
     return reply.status(201).send(newDomain);
   });
 
   fastify.delete('/api/admin/domains/:id', async (req, reply) => {
     const { id } = req.params as { id: string };
     await db.customDomain.delete({ where: { id } });
+    auditLog(req, 'domain.delete', id);
     return { success: true };
   });
 
@@ -365,6 +384,19 @@ export async function adminRoutes(fastify: FastifyInstance) {
       return reply.status(400).send({ error: 'storageBytesLimit must be a non-negative integer (0 = unlimited).' });
     }
     await setStorageQuota(storageBytesLimit);
+    auditLog(req, 'quota.update', null, { storageBytesLimit });
     return { storageBytesLimit: await getStorageQuota() };
+  });
+
+  // 8. Admin audit trail — who did what in the control plane, for forensics.
+  // Sorted newest-first; cap at 200 rows per request.
+  fastify.get('/api/admin/audit', async (req, reply) => {
+    const { limit } = req.query as { limit?: string };
+    const take = Math.min(Math.max(Number(limit) || 50, 1), 200);
+    const entries = await db.auditLog.findMany({
+      take,
+      orderBy: { createdAt: 'desc' },
+    });
+    return entries;
   });
 }
