@@ -173,7 +173,23 @@ export async function s3Routes(fastify: FastifyInstance) {
       if (!upload) {
         return reply.status(404).type('application/xml').send(renderS3ErrorXml('NoSuchUpload', 'The specified upload does not exist.'));
       }
-      const part = await storageEngine.savePartFromStream(uploadId, partNumber, bodyAsStream(req.body));
+      // Multipart parts consume disk before the upload completes, so enforce the
+    // quota here too — otherwise parts could fill the disk while never being
+    // completed (the complete-time check would never fire). Re-uploading the
+    // same part replaces its bytes, so subtract the old part's size.
+    const existingPart = await db.multipartPart.findUnique({
+      where: { uploadId_partNumber: { uploadId, partNumber } },
+    });
+    const partsSum = (await db.multipartPart.aggregate({ where: { uploadId }, _sum: { size: true } }))._sum.size || 0;
+    const partLength = parseInt((req.headers['content-length'] as string) || '0', 10);
+    const addedBytes = partsSum - (existingPart?.size || 0) + partLength;
+    if (addedBytes > 0 && (await wouldExceedQuota(addedBytes))) {
+      return reply.status(507).type('application/xml').send(
+        renderS3ErrorXml('InsufficientStorage', 'Storage quota exceeded. Delete objects or upgrade your plan to free up space.')
+      );
+    }
+
+    const part = await storageEngine.savePartFromStream(uploadId, partNumber, bodyAsStream(req.body));
 
       await db.multipartPart.upsert({
         where: { uploadId_partNumber: { uploadId, partNumber } },
@@ -324,7 +340,17 @@ export async function s3Routes(fastify: FastifyInstance) {
       return reply.status(404).type('application/xml').send(renderS3ErrorXml('NoSuchUpload', 'The specified upload does not exist.'));
     }
 
-    const completeXml = await streamToString(bodyAsStream(req.body));
+    let completeXml: string;
+    try {
+      completeXml = await streamToString(bodyAsStream(req.body), MAX_COMPLETE_XML_BYTES);
+    } catch (err) {
+      if (err instanceof BodyTooLargeError) {
+        return reply.status(413).type('application/xml').send(
+          renderS3ErrorXml('EntityTooLarge', 'The CompleteMultipartUpload body exceeds the 1MB limit.')
+        );
+      }
+      throw err;
+    }
     const partNumbers = [...completeXml.matchAll(/<PartNumber>(\d+)<\/PartNumber>/g)].map((m) => parseInt(m[1], 10));
     const etags = [...completeXml.matchAll(/<ETag>([^<]+)<\/ETag>/g)].map((m) => m[1].trim());
 
@@ -431,10 +457,21 @@ function escapeXml(unsafe: string): string {
   });
 }
 
-async function streamToString(stream: NodeJS.ReadableStream): Promise<string> {
+async function streamToString(stream: NodeJS.ReadableStream, maxBytes = Infinity): Promise<string> {
   const chunks: Buffer[] = [];
+  let total = 0;
   for await (const chunk of stream as AsyncIterable<Buffer>) {
+    total += chunk.length;
+    if (total > maxBytes) throw new BodyTooLargeError();
     chunks.push(chunk);
   }
   return Buffer.concat(chunks).toString('utf8');
 }
+
+// Thrown when a request body exceeds its declared cap (see CompleteMultipartUpload).
+class BodyTooLargeError extends Error {}
+
+// An S3 part list is tiny (tens of bytes per part); capping the XML body at 1MB
+// stops an authenticated client from buffering gigabytes into memory to exhaust
+// the server (the catch-all parser allows up to 10GB).
+const MAX_COMPLETE_XML_BYTES = 1024 * 1024;

@@ -19,7 +19,18 @@ import { isAdminIpAllowed } from './auth/allowlist';
 const fastify = Fastify({
   logger: true,
   trustProxy: true,
+  // Bounded socket lifetimes: an idle connection is dropped after 30s and a
+  // full request must finish within 10 min, so a client that trickles bytes
+  // can't hold sockets hostage (slowloris). maxRequestsPerSocket prevents one
+  // keep-alive connection from issuing an unbounded request stream.
+  connectionTimeout: CONFIG.SERVER_CONNECTION_TIMEOUT_MS,
+  requestTimeout: CONFIG.SERVER_REQUEST_TIMEOUT_MS,
+  keepAliveTimeout: 5000,
+  maxRequestsPerSocket: 1000,
 });
+// headersTimeout isn't a typed Fastify option; set it on the underlying http
+// server (applies from connection accept-time, i.e. before listen).
+fastify.server.headersTimeout = CONFIG.SERVER_HEADERS_TIMEOUT_MS;
 
 let shuttingDown = false;
 

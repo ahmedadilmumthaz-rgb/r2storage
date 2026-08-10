@@ -15,6 +15,12 @@ export const CONFIG = {
   // Optional comma-separated CIDRs (IPv4/IPv6) that may reach /api/admin/*
   // including login; empty = allow all. Enforced via req.ip (CF-Connecting-IP).
   ADMIN_ALLOWED_CIDRS: process.env.ADMIN_ALLOWED_CIDRS || '',
+  // Server-level socket timeouts (slowloris defense-in-depth; nginx guards the
+  // edge, these bound a raw backend socket). Node http defaults are 60s headers
+  // / 5min request; these close idle connections and make the limits explicit.
+  SERVER_CONNECTION_TIMEOUT_MS: parseInt(process.env.SERVER_CONNECTION_TIMEOUT_MS || '30000', 10), // idle socket
+  SERVER_HEADERS_TIMEOUT_MS: parseInt(process.env.SERVER_HEADERS_TIMEOUT_MS || '30000', 10),
+  SERVER_REQUEST_TIMEOUT_MS: parseInt(process.env.SERVER_REQUEST_TIMEOUT_MS || '600000', 10), // raise for slow large uploads
   RATE_LIMIT_GLOBAL: parseInt(process.env.RATE_LIMIT_GLOBAL || '300', 10),
   RATE_LIMIT_ADMIN: parseInt(process.env.RATE_LIMIT_ADMIN || '30', 10),
   RATE_LIMIT_S3: parseInt(process.env.RATE_LIMIT_S3 || '600', 10),

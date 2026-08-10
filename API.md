@@ -84,7 +84,7 @@ GET|PUT|HEAD|POST|DELETE  /s3/<bucket>[/<key>][?query]
 | DeleteObject | `DELETE /s3/<bucket>/<key>` | **full** | `204` |
 | CreateMultipartUpload | `POST /s3/<bucket>/<key>?uploads` | write | XML with `<UploadId>` |
 | UploadPart | `PUT /s3/<bucket>/<key>?uploadId=<id>&partNumber=<n>` | write | returns `ETag` header |
-| CompleteMultipartUpload | `POST /s3/<bucket>/<key>?uploadId=<id>` | write | XML body `<CompleteMultipartUpload>`; returns XML result |
+| CompleteMultipartUpload | `POST /s3/<bucket>/<key>?uploadId=<id>` | write | XML body `<CompleteMultipartUpload>`; returns XML result. Body capped at 1MB (413) — it's only a part list. |
 | AbortMultipartUpload | `DELETE /s3/<bucket>/<key>?uploadId=<id>` | write | `204` |
 
 ### 2.2 Response conventions

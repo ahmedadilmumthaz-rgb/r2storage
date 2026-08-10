@@ -158,6 +158,13 @@ check "quota set to 50B" "200" "$(status_of -H "X-Admin-Secret: $ADMIN_SECRET" -
 head -c 100 /dev/zero > "$TMP/big.bin"
 check "over-quota PUT -> 507" "507" "$(status_of -X PUT -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" --data-binary @"$TMP/big.bin" "$B/s3/smoke/overq.bin")"
 check "rejected object not committed (HEAD 404)" "404" "$(status_of -I -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" "$B/s3/smoke/overq.bin")"
+# Multipart parts consume disk before completion, so UploadPart must honor the
+# quota too (otherwise parts could fill the disk while never being completed).
+MPQ_XML="$(curl -s -X POST -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" "$B/s3/smoke/mpq.bin?uploads")"
+MPQ_ID="$(printf '%s' "$MPQ_XML" | sed -n 's:.*<UploadId>\([^<]*\)</UploadId>.*:\1:p')"
+check "over-quota UploadPart -> 507" "507" "$(status_of -X PUT -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" --data-binary @"$TMP/big.bin" "$B/s3/smoke/mpq.bin?partNumber=1&uploadId=$MPQ_ID")"
+check "over-quota part not persisted (complete fails)" "400" "$(status_of -X POST -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" -H "Content-Type: application/xml" --data "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>\"nope\"</ETag></Part></CompleteMultipartUpload>" "$B/s3/smoke/mpq.bin?uploadId=$MPQ_ID")"
+curl -s -o /dev/null -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" -X DELETE "$B/s3/smoke/mpq.bin?uploadId=$MPQ_ID"
 R=$(curl -s -H "X-Admin-Secret: $ADMIN_SECRET" "$B/api/admin/usage")
 check "usage unchanged after 507" "0" "$(json_field "$R" storageBytes)"
 
@@ -214,6 +221,12 @@ R=$(curl -s -X POST -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" "$B/
 UPLOAD_ID="$(printf '%s' "$R" | sed -n 's:.*<UploadId>\([^<]*\)</UploadId>.*:\1:p')"
 check "create multipart upload" "200" "$(curl -s -o /dev/null -w "%{http_code}" -X POST -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" "$B/s3/smoke/big.bin?uploads")"
 [ -n "$UPLOAD_ID" ] || { echo "✗ no UploadId in XML"; exit 1; }
+
+# CompleteMultipartUpload body is capped at 1MB (it's only a part list); a huge
+# body must be rejected 413 instead of being buffered into memory.
+head -c 2097152 /dev/zero | tr '\0' 'a' > "$TMP/huge.xml"
+check "oversized CompleteMultipartUpload body -> 413" "413" "$(status_of -X POST -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" -H "Content-Type: application/xml" --data-binary @"$TMP/huge.xml" "$B/s3/smoke/big.bin?uploadId=$UPLOAD_ID")"
+rm -f "$TMP/huge.xml"
 
 ETAG1="$(curl -s -D - -o /dev/null -X PUT -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" --data-binary 'part-one' "$B/s3/smoke/big.bin?partNumber=1&uploadId=$UPLOAD_ID" | grep -i '^etag:' | tr -d '\r' | cut -d' ' -f2)"
 ETAG2="$(curl -s -D - -o /dev/null -X PUT -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" --data-binary 'part-two' "$B/s3/smoke/big.bin?partNumber=2&uploadId=$UPLOAD_ID" | grep -i '^etag:' | tr -d '\r' | cut -d' ' -f2)"
