@@ -89,6 +89,8 @@ echo "== booting throwaway instance on :$PORT =="
   cd "$BACKEND"
   exec env PORT="$PORT" HOST=127.0.0.1 DATABASE_URL="file:$DB" STORAGE_DIR="$STORE" \
     ADMIN_SECRET="$ADMIN_SECRET" BASE_DOMAIN=localhost NODE_ENV=production \
+    LOGIN_FAIL_THRESHOLD=3 LOGIN_GLOBAL_THRESHOLD=5 LOGIN_IP_COOLDOWN_SEC=60 \
+    LOGIN_GLOBAL_COOLDOWN_SEC=60 LOGIN_FAILURE_DELAY_MS=1 \
     node dist/index.js >"$LOG" 2>&1
 ) &
 SERVER_PID=$!
@@ -215,15 +217,56 @@ R=$(curl -s -b "$COOKIES" "$B/api/admin/session")
 check "session invalid after logout" "false" "$(json_field "$R" authenticated)"
 check "overview after logout -> 401" "401" "$(status_of -b "$COOKIES" "$B/api/admin/overview")"
 
-# --- rate limiting (last: consumes the whole /api/admin budget) -------------------
+# --- brute-force lockout + rate limiting (last: leaves the lockout armed) --------
+# The throwaway server boots with LOGIN_FAIL_THRESHOLD=3 / LOGIN_GLOBAL_THRESHOLD=5.
+# Each simulated client sends its own X-Forwarded-For so per-IP counters are
+# independent of the real 127.0.0.1 rate-limit budget (trustProxy trusts XFF).
+echo "== login brute-force lockout =="
+login_of() { # login_of <xff> <secret>
+  status_of -H "X-Forwarded-For: $1" -X POST -H "Content-Type: application/json" \
+    -d "{\"secret\":\"$2\"}" "$B/api/admin/login"
+}
+
+# 1. Per-IP lockout: 3 consecutive bad attempts from one address lock it out.
+check "per-IP: 1st bad login -> 401" "401" "$(login_of 1.1.1.1 wrong)"
+check "per-IP: 2nd bad login -> 401" "401" "$(login_of 1.1.1.1 wrong)"
+check "per-IP: 3rd bad login -> 401" "401" "$(login_of 1.1.1.1 wrong)"
+check "per-IP: correct secret now locked out -> 429" "429" "$(login_of 1.1.1.1 "$ADMIN_SECRET")"
+
+R=$(curl -s -D - -o /dev/null -H "X-Forwarded-For: 1.1.1.1" -X POST -H "Content-Type: application/json" \
+  -d "{\"secret\":\"$ADMIN_SECRET\"}" "$B/api/admin/login")
+[ -n "$(printf '%s' "$R" | grep -i '^retry-after:')" ] && PASS=$((PASS + 1)) && echo "  ok   lockout response carries Retry-After" \
+  || { FAIL=$((FAIL + 1)); FAILURES+=("lockout response had no Retry-After"); echo "  FAIL lockout response carries Retry-After"; }
+
+# 2. Per-IP isolation + audit trail: another address still logs in (global not
+#    tripped by one source), and the overview reports the 3 failed attempts.
+COOKIES2="$TMP/cookies2.txt"
+LOGIN_CODE="$(curl -s -c "$COOKIES2" -o /dev/null -w "%{http_code}" -H "X-Forwarded-For: 2.2.2.2" -X POST -H "Content-Type: application/json" -d "{\"secret\":\"$ADMIN_SECRET\"}" "$B/api/admin/login")"
+check "per-IP: other address still logs in (isolation)" "200" "$LOGIN_CODE"
+R=$(curl -s -b "$COOKIES2" "$B/api/admin/overview")
+# 3 failed lockout attempts from 1.1.1.1 + 1 from the session section's
+# "wrong secret -> 401" check (127.0.0.1) = 4 rows.
+check "failed logins surfaced in overview" "4" "$(json_field "$R" failedLogins24h)"
+
+# 3. Global lockout: 5 total failures across fresh addresses block everyone,
+#    even an address that never failed.
+check "global: 1st bad login -> 401" "401" "$(login_of 2.2.2.2 wrong)"
+check "global: 2nd bad login -> 401" "401" "$(login_of 3.3.3.3 wrong)"
+check "global: 3rd bad login -> 401" "401" "$(login_of 4.4.4.4 wrong)"
+check "global: 4th bad login -> 401" "401" "$(login_of 5.5.5.5 wrong)"
+check "global: 5th bad login -> 401" "401" "$(login_of 6.6.6.6 wrong)"
+check "global: fresh address locked out too -> 429" "429" "$(login_of 7.7.7.7 "$ADMIN_SECRET")"
+
+# 4. Per-IP admin rate limit still fires (overview hammer; no secret header so
+#    the lockout counters are untouched).
 echo "== rate limiting =="
 COUNT_429=0
 for _ in $(seq 1 40); do
-  CODE="$(status_of -X POST -H "Content-Type: application/json" -d '{"secret":"bruteforce"}' "$B/api/admin/login")"
+  CODE="$(status_of -b "$COOKIES" "$B/api/admin/overview")"
   [ "$CODE" = "429" ] && COUNT_429=$((COUNT_429 + 1))
 done
-[ "$COUNT_429" -ge 1 ] && PASS=$((PASS + 1)) && echo "  ok   admin hammer -> 429 (x$COUNT_429)" \
-  || { FAIL=$((FAIL + 1)); FAILURES+=("admin hammer never returned 429"); echo "  FAIL admin hammer never returned 429"; }
+[ "$COUNT_429" -ge 1 ] && PASS=$((PASS + 1)) && echo "  ok   admin overview hammer -> 429 (x$COUNT_429)" \
+  || { FAIL=$((FAIL + 1)); FAILURES+=("admin overview hammer never returned 429"); echo "  FAIL admin overview hammer -> 429"; }
 
 # --- summary ----------------------------------------------------------------------
 echo

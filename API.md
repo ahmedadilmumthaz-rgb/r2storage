@@ -51,6 +51,8 @@ curl -b cookies.txt -X POST https://panel.example.com/api/admin/logout
 curl https://panel.example.com/api/admin/session   # {"authenticated":true|false}
 ```
 
+Wrong-secret logins are rate-limited (10/min/IP on `/api/admin/login`) **and** counted toward an escalating lockout: a source IP is blocked for `LOGIN_IP_COOLDOWN_SEC` (default 30 min) after `LOGIN_FAIL_THRESHOLD` (default 5) consecutive failures; once `LOGIN_GLOBAL_THRESHOLD` (default 15) failures accumulate across all IPs, a global cooldown kicks in that doubles each time it re-triggers (cap 1 hour). Locked-out logins return `429` with a `Retry-After` header. The `GET /api/admin/overview` `failedLogins24h` field reports how many failures were recorded in the last 24h.
+
 **B. `X-Admin-Secret` header (scripts/CLI).** Kept for tooling:
 
 ```

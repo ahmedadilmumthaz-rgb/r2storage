@@ -59,7 +59,10 @@ async function start() {
     fastify.addHook('onRoute', (routeOptions) => {
       const url = routeOptions.url || '';
       let limit: { max: number; timeWindow: string } | undefined;
-      if (url.startsWith('/api/')) {
+      if (url.startsWith('/api/admin/login')) {
+        // Login gets its own, tighter cap on top of the lockout in auth/lockout.ts.
+        limit = { max: 10, timeWindow: '1 minute' };
+      } else if (url.startsWith('/api/')) {
         limit = { max: CONFIG.RATE_LIMIT_ADMIN, timeWindow: '1 minute' }; // brute-force protection
       } else if (url.startsWith('/s3')) {
         limit = { max: CONFIG.RATE_LIMIT_S3, timeWindow: '1 minute' };

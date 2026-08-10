@@ -82,6 +82,17 @@ model Setting {
   updatedAt DateTime @updatedAt
 }
 
+// Audit trail for failed admin logins (brute-force visibility). Rows are
+// pruned by the maintenance sweeper after LOG_RETENTION_DAYS.
+model FailedLogin {
+  id        Int      @id @default(autoincrement())
+  ip        String
+  userAgent String?
+  createdAt DateTime @default(now())
+
+  @@index([createdAt])
+}
+
 model MultipartUpload {
   id          String   @id @default(uuid())
   bucketName  String

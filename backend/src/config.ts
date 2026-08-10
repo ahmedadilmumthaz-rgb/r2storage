@@ -20,5 +20,11 @@ export const CONFIG = {
   // Storage quota in bytes; 0 = unlimited. Overridable at runtime via
   // PATCH /api/admin/quota (persisted in the Setting table).
   STORAGE_QUOTA_BYTES: parseInt(process.env.STORAGE_QUOTA_BYTES || '0', 10),
+  // Brute-force lockout for the admin login (see auth/lockout.ts).
+  LOGIN_FAIL_THRESHOLD: parseInt(process.env.LOGIN_FAIL_THRESHOLD || '5', 10), // consecutive per-IP failures
+  LOGIN_IP_COOLDOWN_SEC: parseInt(process.env.LOGIN_IP_COOLDOWN_SEC || '1800', 10), // 30 min per-IP block
+  LOGIN_GLOBAL_THRESHOLD: parseInt(process.env.LOGIN_GLOBAL_THRESHOLD || '15', 10), // failures across all IPs
+  LOGIN_GLOBAL_COOLDOWN_SEC: parseInt(process.env.LOGIN_GLOBAL_COOLDOWN_SEC || '300', 10), // 5 min, doubles on re-trigger
+  LOGIN_FAILURE_DELAY_MS: parseInt(process.env.LOGIN_FAILURE_DELAY_MS || '150', 10), // fixed delay before replying 401
   IS_PRODUCTION: process.env.NODE_ENV === 'production',
 };

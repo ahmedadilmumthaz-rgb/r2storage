@@ -74,6 +74,18 @@ async function sweepRequestLogs(): Promise<number> {
   return deleted.count;
 }
 
+async function sweepFailedLogins(): Promise<number> {
+  const cutoff = new Date(Date.now() - CONFIG.LOG_RETENTION_DAYS * 24 * 60 * 60 * 1000);
+  const deleted = await db.failedLogin.deleteMany({
+    where: { createdAt: { lt: cutoff } },
+  });
+
+  if (deleted.count > 0) {
+    console.log(`[maintenance] pruned ${deleted.count} failed-login row(s) older than ${CONFIG.LOG_RETENTION_DAYS} days`);
+  }
+  return deleted.count;
+}
+
 async function sweepExpiredSessions(): Promise<number> {
   const deleted = await db.adminSession.deleteMany({
     where: { expiresAt: { lt: new Date() } },
@@ -89,6 +101,7 @@ export async function runMaintenanceSweep(): Promise<void> {
   await sweepTmpFiles();
   await sweepAbandonedMultipartUploads();
   await sweepRequestLogs();
+  await sweepFailedLogins();
   await sweepExpiredSessions();
 }
 

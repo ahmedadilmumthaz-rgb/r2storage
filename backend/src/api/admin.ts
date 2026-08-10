@@ -6,6 +6,7 @@ import { CONFIG } from '../config';
 import { secretsEqual } from '../auth/secrets';
 import { SESSION_COOKIE, isValidSession } from '../auth/session';
 import { getStorageQuota, setStorageQuota, usedStorageBytes, wouldExceedQuota } from '../quota';
+import { isLockedOut, recordFailure } from '../auth/lockout';
 import mime from 'mime-types';
 import crypto from 'crypto';
 
@@ -27,6 +28,18 @@ export async function adminRoutes(fastify: FastifyInstance) {
     const provided = req.headers['x-admin-secret'];
     if (typeof provided === 'string' && secretsEqual(provided, CONFIG.ADMIN_SECRET)) return;
 
+    // A wrong x-admin-secret is brute-forcing the same shared secret, so count
+    // it toward the caller's per-IP lockout — but NOT the global tier, so a
+    // misconfigured monitoring script can't lock every admin out. Requests with
+    // no secret header at all (just a stale session) don't count.
+    if (typeof provided === 'string') {
+      const locked = recordFailure(req.ip, 'perIp');
+      if (locked.locked) {
+        reply.header('Retry-After', String(locked.retryAfterSec));
+        return reply.status(429).send({ error: 'Too many failed admin authentication attempts. Try again later.' });
+      }
+    }
+
     return reply.status(401).send({ error: 'Unauthorized. Missing or invalid admin session or secret.' });
   });
 
@@ -42,6 +55,11 @@ export async function adminRoutes(fastify: FastifyInstance) {
     const accessKeysCount = await db.accessKey.count();
     const customDomainsCount = await db.customDomain.count();
 
+    // Brute-force visibility: failed admin logins in the last 24h.
+    const failedLogins24h = await db.failedLogin.count({
+      where: { createdAt: { gt: new Date(Date.now() - 24 * 60 * 60 * 1000) } },
+    });
+
     const logs = await db.requestLog.findMany({
       take: 20,
       orderBy: { createdAt: 'desc' },
@@ -53,6 +71,7 @@ export async function adminRoutes(fastify: FastifyInstance) {
       totalStorageBytes,
       accessKeysCount,
       customDomainsCount,
+      failedLogins24h,
       recentLogs: logs,
     };
   });

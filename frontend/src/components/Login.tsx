@@ -13,9 +13,11 @@ export const Login: React.FC<{ onAuthenticated: () => void }> = ({ onAuthenticat
     setLoading(true);
     setError('');
     try {
-      const ok = await login(secret);
-      if (ok) {
+      const status = await login(secret);
+      if (status === 200) {
         onAuthenticated();
+      } else if (status === 429) {
+        setError('Too many failed attempts — this IP is temporarily locked out.');
       } else {
         setError('Invalid admin secret.');
       }
