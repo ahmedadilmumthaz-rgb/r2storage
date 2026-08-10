@@ -91,6 +91,7 @@ echo "== booting throwaway instance on :$PORT =="
     ADMIN_SECRET="$ADMIN_SECRET" BASE_DOMAIN=localhost NODE_ENV=production \
     LOGIN_FAIL_THRESHOLD=3 LOGIN_GLOBAL_THRESHOLD=5 LOGIN_IP_COOLDOWN_SEC=60 \
     LOGIN_GLOBAL_COOLDOWN_SEC=60 LOGIN_FAILURE_DELAY_MS=1 \
+    ADMIN_SESSION_TTL_HOURS=0.01 \
     node dist/index.js >"$LOG" 2>&1
 ) &
 SERVER_PID=$!
@@ -117,6 +118,14 @@ check "login with correct secret" "true" "$(json_field "$R" ok)"
 
 R=$(curl -s -b "$COOKIES" "$B/api/admin/session")
 check "session authenticated after login" "true" "$(json_field "$R" authenticated)"
+
+# Session hardening: activity slides the expiry forward (idle TTL is 36s here).
+S0="$(json_field "$R" expiresAt)"
+sleep 1.2
+curl -s -o /dev/null -b "$COOKIES" "$B/api/admin/overview"   # guarded -> renews
+R=$(curl -s -b "$COOKIES" "$B/api/admin/session")
+S1="$(json_field "$R" expiresAt)"
+check "session expiry slides forward on activity" "true" "$(node -e "process.stdout.write(String(Date.parse('$S1')>Date.parse('$S0')))")"
 
 check "overview with cookie -> 200" "200" "$(status_of -b "$COOKIES" "$B/api/admin/overview")"
 check "overview without cookie/header -> 401" "401" "$(status_of "$B/api/admin/overview")"
@@ -283,6 +292,43 @@ for _ in $(seq 1 40); do
 done
 [ "$COUNT_429" -ge 1 ] && PASS=$((PASS + 1)) && echo "  ok   admin overview hammer -> 429 (x$COUNT_429)" \
   || { FAIL=$((FAIL + 1)); FAILURES+=("admin overview hammer never returned 429"); echo "  FAIL admin overview hammer -> 429"; }
+
+# --- session absolute-lifetime cap (second throwaway boot, short MAX) -----------
+# Proves that even with a long idle TTL, renewal can never push a session past
+# ADMIN_SESSION_MAX_HOURS (0.002h = 7.2s here).
+echo "== session absolute-lifetime cap =="
+PORT2=$((PORT + 1))
+DB2="$TMP/cap.db"
+STORE2="$TMP/store2"
+LOG2="$TMP/server2.log"
+mkdir -p "$STORE2"
+(
+  cd "$BACKEND"
+  DATABASE_URL="file:$DB2" npx prisma db push >/dev/null 2>&1
+)
+(
+  cd "$BACKEND"
+  exec env PORT="$PORT2" HOST=127.0.0.1 DATABASE_URL="file:$DB2" STORAGE_DIR="$STORE2" \
+    ADMIN_SECRET="$ADMIN_SECRET" BASE_DOMAIN=localhost NODE_ENV=production \
+    ADMIN_SESSION_MAX_HOURS=0.002 \
+    node dist/index.js >"$LOG2" 2>&1
+) &
+SERVER2_PID=$!
+B2="http://127.0.0.1:$PORT2"
+for _ in $(seq 1 50); do
+  curl -sf "$B2/health" >/dev/null 2>&1 && break
+  sleep 0.2
+done
+COOKIES3="$TMP/cookies3.txt"
+curl -s -c "$COOKIES3" -o /dev/null -X POST -H "Content-Type: application/json" \
+  -d "{\"secret\":\"$ADMIN_SECRET\"}" "$B2/api/admin/login"
+S0="$(curl -s -b "$COOKIES3" "$B2/api/admin/session" | node -e "const d=JSON.parse(require('fs').readFileSync(0));process.stdout.write(d.expiresAt||'')")"
+check "session born capped at MAX (~7.2s)" "true" "$(node -e "const d=Date.parse('$S0')-Date.now();process.stdout.write(String(d>=5000&&d<=9000))")"
+curl -s -o /dev/null -b "$COOKIES3" "$B2/api/admin/overview"   # renewal attempt
+S1="$(curl -s -b "$COOKIES3" "$B2/api/admin/session" | node -e "const d=JSON.parse(require('fs').readFileSync(0));process.stdout.write(d.expiresAt||'')")"
+check "renewal cannot extend past the cap" "true" "$(node -e "process.stdout.write(String(Math.abs(Date.parse('$S1')-Date.parse('$S0'))<1000))")"
+check "session still authenticated under cap" "true" "$(curl -s -b "$COOKIES3" "$B2/api/admin/session" | node -e "const d=JSON.parse(require('fs').readFileSync(0));process.stdout.write(String(d.authenticated))")"
+kill "$SERVER2_PID" 2>/dev/null; wait "$SERVER2_PID" 2>/dev/null
 
 # --- summary ----------------------------------------------------------------------
 echo

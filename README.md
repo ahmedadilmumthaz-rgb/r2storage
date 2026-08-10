@@ -51,7 +51,7 @@ It speaks the **real S3 API** (SigV4 auth, multipart uploads, presigned URLs —
 | Engineering concern | Implementation |
 |---|---|
 | **Protocol fidelity** | Real AWS **SigV4** signature verification (header + presigned URLs), multipart uploads, `ListObjectsV2`, streaming GET/PUT. |
-| **AuthN/AuthZ** | Access Key / Secret pairs with `FULL`/`READ_ONLY`/`WRITE_ONLY` permissions and per-key bucket filters; dashboard sessions via `HttpOnly SameSite=Strict` cookies (hashed server-side, revocable). |
+| **AuthN/AuthZ** | Access Key / Secret pairs with `FULL`/`READ_ONLY`/`WRITE_ONLY` permissions and per-key bucket filters; dashboard sessions via `HttpOnly SameSite=Strict` cookies (hashed server-side, revocable), with sliding idle expiry and an absolute lifetime cap. |
 | **Brute-force defense** | Escalating login lockout (per-IP block + doubling global cooldown with `Retry-After`), failed-login audit table, constant-time secret comparison, per-scope rate limits keyed off the real client IP. |
 | **Admin audit trail** | Every privileged admin action (bucket/key/domain/quota changes, logins) is recorded with auth source, IP, and user agent, viewable in the dashboard and queryable at `GET /api/admin/audit`. |
 | **Multi-tenancy** | Per-tenant containers with own SQLite + blobs, resource caps (`--memory 1g --cpus 1`, read-only rootfs), loopback-only ports routed by Host header. |
@@ -60,7 +60,7 @@ It speaks the **real S3 API** (SigV4 auth, multipart uploads, presigned URLs —
 | **Provisioning automation** | `docker run` → health wait → default bucket/keys → nginx map write + reload, with full rollback on failure. |
 | **Operational visibility** | Operator console with live per-tenant health/latency and quota; request logging + admin analytics. |
 | **Deploy automation** | One-command baremetal installer (per-instance systemd + nginx), Cloudflare-origin-cert TLS, per-instance backup cron. |
-| **Testing** | Backend smoke suite (**57 checks** — S3, multipart, presigned, auth, rate limits) and a full-platform E2E smoke (`18 checks`), both runnable in CI. |
+| **Testing** | Backend smoke suite (**61 checks** — S3, multipart, presigned, auth, rate limits) and a full-platform E2E smoke (`18 checks`), both runnable in CI. |
 
 ---
 
@@ -140,7 +140,7 @@ Open `http://localhost:5173` and log in with your `ADMIN_SECRET`.
 
 ```bash
 npm run build             # build backend + frontend
-npm test                  # backend smoke suite (57 checks, boots a throwaway instance)
+npm test                  # backend smoke suite (61 checks, boots a throwaway instance)
 bash scripts/sec-check.sh # ad-hoc security spot-checks (secret-less auth, presigned caps, login lockout)
 npm run test:platform     # platform E2E smoke — needs a running platform (see PLATFORM.md)
 ```

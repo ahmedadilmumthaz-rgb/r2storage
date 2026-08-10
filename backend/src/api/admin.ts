@@ -4,7 +4,7 @@ import { storageEngine } from '../storage/engine';
 import { S3Auth } from '../auth/s3auth';
 import { CONFIG } from '../config';
 import { secretsEqual } from '../auth/secrets';
-import { SESSION_COOKIE, isValidSession } from '../auth/session';
+import { SESSION_COOKIE, renewSession } from '../auth/session';
 import { getStorageQuota, setStorageQuota, usedStorageBytes, wouldExceedQuota } from '../quota';
 import { isLockedOut, recordFailure } from '../auth/lockout';
 import { auditLog } from '../auth/audit';
@@ -24,7 +24,10 @@ export async function adminRoutes(fastify: FastifyInstance) {
       req.url.startsWith('/api/admin/session');
     if (isPublicAdminRoute) return;
 
-    if (await isValidSession((req.cookies || {})[SESSION_COOKIE])) {
+    // Renew the session on activity (sliding expiry, capped by the absolute
+    // lifetime) — an actively-used dashboard stays logged in, but no session
+    // outlives ADMIN_SESSION_MAX_HOURS even if something keeps polling it.
+    if (await renewSession((req.cookies || {})[SESSION_COOKIE])) {
       req.adminActor = 'session';
       return;
     }

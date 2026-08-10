@@ -59,7 +59,7 @@ Wrong-secret logins are rate-limited (10/min/IP on `/api/admin/login`) **and** c
 X-Admin-Secret: <your ADMIN_SECRET>
 ```
 
-A wrong or missing credential returns `401 {"error": "Unauthorized..."}`. Sessions expire after `ADMIN_SESSION_TTL_HOURS` (default 24h).
+A wrong or missing credential returns `401 {"error": "Unauthorized..."}`. Sessions expire after `ADMIN_SESSION_TTL_HOURS` of inactivity (default 24h) and are **sliding-renewed** on each authenticated request — but never past the absolute `ADMIN_SESSION_MAX_HOURS` ceiling (default 7 days), so even a session kept alive by a polling dashboard eventually dies. `GET /api/admin/session` reports `{"authenticated": bool, "expiresAt": ISO|null}`.
 
 ---
 

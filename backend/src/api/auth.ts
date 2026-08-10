@@ -1,7 +1,7 @@
 import { FastifyInstance, FastifyRequest } from 'fastify';
 import { CONFIG } from '../config';
 import { secretsEqual } from '../auth/secrets';
-import { SESSION_COOKIE, createSession, destroySession, isValidSession, sessionCookieOptions } from '../auth/session';
+import { SESSION_COOKIE, createSession, destroySession, getSession, sessionCookieOptions } from '../auth/session';
 import { isLockedOut, recordFailure, resetLockout } from '../auth/lockout';
 import { auditLog } from '../auth/audit';
 import { db } from '../db';
@@ -58,6 +58,7 @@ export async function authRoutes(fastify: FastifyInstance) {
 
   fastify.get('/api/admin/session', async (req: FastifyRequest) => {
     const token = (req.cookies || {})[SESSION_COOKIE];
-    return { authenticated: await isValidSession(token) };
+    const session = await getSession(token);
+    return { authenticated: !!session, expiresAt: session ? session.expiresAt.toISOString() : null };
   });
 }

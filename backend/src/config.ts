@@ -16,7 +16,12 @@ export const CONFIG = {
   RATE_LIMIT_ADMIN: parseInt(process.env.RATE_LIMIT_ADMIN || '30', 10),
   RATE_LIMIT_S3: parseInt(process.env.RATE_LIMIT_S3 || '600', 10),
   LOG_RETENTION_DAYS: parseInt(process.env.LOG_RETENTION_DAYS || '30', 10),
-  ADMIN_SESSION_TTL_HOURS: parseInt(process.env.ADMIN_SESSION_TTL_HOURS || '24', 10),
+  // Float hours so tests and deployments can use sub-hour lifetimes (e.g. 0.01h).
+  ADMIN_SESSION_TTL_HOURS: parseFloat(process.env.ADMIN_SESSION_TTL_HOURS || '24'),
+  // Absolute cap on a session's lifetime regardless of activity. Sliding renewal
+  // (each authenticated request extends expiry to now+TTL) can never push past
+  // this ceiling, so an abandoned-but-forever-polled session still dies.
+  ADMIN_SESSION_MAX_HOURS: parseFloat(process.env.ADMIN_SESSION_MAX_HOURS || '168'), // 7 days
   // Storage quota in bytes; 0 = unlimited. Overridable at runtime via
   // PATCH /api/admin/quota (persisted in the Setting table).
   STORAGE_QUOTA_BYTES: parseInt(process.env.STORAGE_QUOTA_BYTES || '0', 10),
