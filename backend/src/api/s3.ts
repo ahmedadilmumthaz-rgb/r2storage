@@ -579,6 +579,93 @@ export async function s3Routes(fastify: FastifyInstance) {
 
     return reply.status(200).type('application/xml').send(renderMultipartCompleteXml(bucketName, key, etag));
   });
+
+  // 7. POST /s3/:bucket?delete (DeleteObjects batch)
+  fastify.post('/s3/:bucket', async (req: FastifyRequest, reply: FastifyReply) => {
+    const { bucket: bucketName } = req.params as { bucket: string };
+    const query = req.query as Record<string, string>;
+
+    if (query['delete'] === undefined) {
+      return reply.status(400).type('application/xml').send(
+        renderS3ErrorXml('InvalidRequest', 'Bucket-level POST only supports the DeleteObjects operation via ?delete')
+      );
+    }
+
+    const bucket = await db.bucket.findUnique({ where: { name: bucketName } });
+    if (!bucket) {
+      return reply.status(404).type('application/xml').send(renderS3ErrorXml('NoSuchBucket', 'Bucket not found'));
+    }
+
+    const auth = await S3Auth.authenticateRequest(req.headers, query, req.method, req.url);
+    if (!auth.authenticated) {
+      return reply.status(403).type('application/xml').send(renderS3ErrorXml('AccessDenied', auth.error || 'Access Denied'));
+    }
+    const denied = permissionDenied(auth, bucketName, 'full');
+    if (denied) {
+      return reply.status(403).type('application/xml').send(renderS3ErrorXml('AccessDenied', denied));
+    }
+
+    // The key list is capped the same way as the multipart part list: bounded
+    // body (1MB) and a hard key count limit so a hostile batch can't blow up
+    // memory or the loop.
+    let deleteXml: string;
+    try {
+      deleteXml = await streamToString(bodyAsStream(req.body), MAX_COMPLETE_XML_BYTES);
+    } catch (err) {
+      if (err instanceof BodyTooLargeError) {
+        return reply.status(413).type('application/xml').send(
+          renderS3ErrorXml('EntityTooLarge', 'The DeleteObjects body exceeds the 1MB limit.')
+        );
+      }
+      throw err;
+    }
+
+    const quiet = /<Quiet>\s*(true|1)\s*<\/Quiet>/i.test(deleteXml);
+    const keys = [...deleteXml.matchAll(/<Key>([^<]+)<\/Key>/g)].map((m) => m[1]).filter((k) => k.length > 0);
+    // S3 rejects duplicate keys in one batch; dedupe to stay safe regardless.
+    const uniqueKeys = [...new Set(keys)];
+    if (uniqueKeys.length === 0) {
+      return reply.status(400).type('application/xml').send(
+        renderS3ErrorXml('MalformedXML', 'The XML you provided was not well-formed or did not validate against our published schema')
+      );
+    }
+    if (uniqueKeys.length > 1000) {
+      return reply.status(400).type('application/xml').send(
+        renderS3ErrorXml('MalformedXML', 'The DeleteObjects request contains more than 1000 keys')
+      );
+    }
+
+    const objects = await db.object.findMany({
+      where: { bucketName, key: { in: uniqueKeys } },
+    });
+    const byKey = new Map(objects.map((o) => [o.key, o]));
+
+    const deleted: string[] = [];
+    const errors: { key: string; code: string; message: string }[] = [];
+    for (const key of uniqueKeys) {
+      const obj = byKey.get(key);
+      if (!obj) continue; // S3 silently ignores keys that don't exist
+      try {
+        await storageEngine.deleteObjectFile(obj.storagePath);
+        await db.object.delete({ where: { id: obj.id } });
+        deleted.push(key);
+      } catch (err) {
+        errors.push({ key, code: 'InternalError', message: 'We encountered an internal error. Please try again.' });
+      }
+    }
+
+    let xml = `<?xml version="1.0" encoding="UTF-8"?>\n<DeleteResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">\n`;
+    if (!quiet) {
+      for (const key of deleted) xml += `  <Deleted><Key>${escapeXml(key)}</Key></Deleted>\n`;
+    }
+    for (const e of errors) {
+      xml += `  <Error><Key>${escapeXml(e.key)}</Key><Code>${escapeXml(e.code)}</Code><Message>${escapeXml(e.message)}</Message></Error>\n`;
+    }
+    xml += `</DeleteResult>`;
+
+    reply.header('Access-Control-Allow-Origin', bucket.corsOrigins || '*');
+    return reply.status(200).type('application/xml').send(xml);
+  });
 }
 
 function renderListObjectsV2Xml(bucketName: string, prefix: string, objects: any[]): string {

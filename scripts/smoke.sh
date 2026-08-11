@@ -299,6 +299,33 @@ check "malformed copy-source -> 400" "400" "$(status_of "${RCOPY_OPTS[@]}" -X PU
 check "scoped key cannot copy cross-bucket -> 403" "403" "$(status_of -X PUT "${AUTH_OPTS[@]}" -H "x-amz-copy-source: /smoke/hello.txt" "$B/s3/smoke2/denied.txt")"
 check "copy with If-None-Match: * on existing dest -> 409" "409" "$(status_of "${RCOPY_OPTS[@]}" -X PUT -H "x-amz-copy-source: /smoke/hello.txt" -H 'If-None-Match: *' "$B/s3/smoke2/hi.txt")"
 
+# --- batch delete (DeleteObjects) ---------------------------------------------------
+echo "== DeleteObjects =="
+for k in del1.txt del2.txt del3.txt keep.txt; do
+  printf 'data-%s' "$k" > "$TMP/$k"
+  status_of -X PUT "${AUTH_OPTS[@]}" --data-binary @"$TMP/$k" "$B/s3/smoke/$k" >/dev/null
+done
+DEL_XML="<Delete><Object><Key>del1.txt</Key></Object><Object><Key>del2.txt</Key></Object><Object><Key>missing.txt</Key></Object></Delete>"
+DEL_RESULT="$(curl -s -X POST "${AUTH_OPTS[@]}" -H "Content-Type: application/xml" --data "$DEL_XML" "$B/s3/smoke?delete")"
+check "DeleteObjects -> 200" "200" "$(status_of -X POST "${AUTH_OPTS[@]}" -H "Content-Type: application/xml" --data "$DEL_XML" "$B/s3/smoke?delete")"
+check "DeleteObjects echoes deleted keys (non-quiet)" "2" "$(printf '%s' "$DEL_RESULT" | grep -c '<Deleted>')"
+check "DeleteObjects reports no errors for missing key" "0" "$(printf '%s' "$DEL_RESULT" | grep -c '<Error>')"
+check "batch-deleted del1.txt is gone" "404" "$(status_of -I "${AUTH_OPTS[@]}" "$B/s3/smoke/del1.txt")"
+check "batch-deleted del2.txt is gone" "404" "$(status_of -I "${AUTH_OPTS[@]}" "$B/s3/smoke/del2.txt")"
+check "unlisted keep.txt survives" "200" "$(status_of -I "${AUTH_OPTS[@]}" "$B/s3/smoke/keep.txt")"
+QRESULT="$(curl -s -X POST "${AUTH_OPTS[@]}" -H "Content-Type: application/xml" --data '<Delete><Quiet>true</Quiet><Object><Key>del3.txt</Key></Object></Delete>' "$B/s3/smoke?delete")"
+check "quiet DeleteObjects omits Deleted echoes" "0" "$(printf '%s' "$QRESULT" | grep -c '<Deleted>')"
+check "quiet-deleted del3.txt is gone" "404" "$(status_of -I "${AUTH_OPTS[@]}" "$B/s3/smoke/del3.txt")"
+check "DeleteObjects empty body -> 400" "400" "$(status_of -X POST "${AUTH_OPTS[@]}" -H "Content-Type: application/xml" --data '<Delete></Delete>' "$B/s3/smoke?delete")"
+BIGXML="$(node -e 'const ks=Array.from({length:1001},(_,i)=>`<Object><Key>k${i}</Key></Object>`).join("");process.stdout.write(`<Delete>${ks}</Delete>`)')"
+check "DeleteObjects >1000 keys -> 400" "400" "$(status_of -X POST "${AUTH_OPTS[@]}" -H "Content-Type: application/xml" --data "$BIGXML" "$B/s3/smoke?delete")"
+# Batch delete needs FULL: a read-only key must be refused.
+ROKEY=$(curl -s -b "$COOKIES" -X POST -H "Content-Type: application/json" -d '{"name":"ro","permission":"READ_ONLY","bucketFilter":"smoke"}' "$B/api/admin/keys")
+ROAK="$(json_field "$ROKEY" accessKeyId)"
+ROSK="$(json_field "$ROKEY" secretAccessKey)"
+check "DeleteObjects with READ_ONLY key -> 403" "403" "$(status_of -X POST -H "x-access-key-id: $ROAK" -H "x-access-key-secret: $ROSK" -H "Content-Type: application/xml" --data "$DEL_XML" "$B/s3/smoke?delete")"
+check "bucket-level POST without ?delete -> 400" "400" "$(status_of -X POST "${AUTH_OPTS[@]}" -H "Content-Type: application/xml" --data '<Delete></Delete>' "$B/s3/smoke")"
+
 # --- multipart ------------------------------------------------------------------
 echo "== multipart upload =="
 R=$(curl -s -X POST -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" "$B/s3/smoke/big.bin?uploads")

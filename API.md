@@ -87,6 +87,7 @@ GET|PUT|HEAD|POST|DELETE  /s3/<bucket>[/<key>][?query]
 | GetObject | `GET /s3/<bucket>/<key>` | public: none; private: read | streams body; sets `Content-Type`, `ETag`, `Content-Length`; supports **byte-range + conditional GET** (below) |
 | HeadObject | `HEAD /s3/<bucket>/<key>` | public: none; private: read | headers only, no body |
 | DeleteObject | `DELETE /s3/<bucket>/<key>` | **full** | `204` |
+| DeleteObjects | `POST /s3/<bucket>?delete` | **full** | XML body `<Delete><Object><Key>k</Key></Object>...<Quiet>true</Quiet></Delete>` (≤ 1000 keys); returns `<DeleteResult>` echoing deleted keys unless `<Quiet>true</Quiet>`. Missing keys are silently ignored; body capped at 1MB (413). |
 | CopyObject | `PUT /s3/<bucket>/<key>` + `x-amz-copy-source: /<src-bucket>/<src-key>` | write (dest) + read (src) | server-side copy (no payload); returns `CopyObjectResult` XML. `x-amz-metadata-directive: COPY` (default) carries the source's `Content-Type`; `REPLACE` takes the request's `Content-Type`. Copying an object onto itself requires `REPLACE` (else `400`). Honors the same conditional-write headers as PutObject on the destination. |
 | CreateMultipartUpload | `POST /s3/<bucket>/<key>?uploads` | write | XML with `<UploadId>` |
 | UploadPart | `PUT /s3/<bucket>/<key>?uploadId=<id>&partNumber=<n>` | write | returns `ETag` header |
