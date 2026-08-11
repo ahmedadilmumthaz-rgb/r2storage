@@ -36,13 +36,14 @@ function renderMultipartInitXml(bucketName: string, key: string, uploadId: strin
 // ETag values are server-generated `"hex"` strings (quotes + hex are legal
 // raw XML text), so no escaping is needed — escaping the quotes would corrupt
 // client round-trips (e.g. feeding a CopyPartResult ETag back into a
-// CompleteMultipartUpload).
-function renderMultipartCompleteXml(bucketName: string, key: string, etag: string): string {
+// CompleteMultipartUpload). ChecksumCRC32 (base64, no XML-significant chars)
+// is emitted verbatim too, matching what newer SDKs parse from the result.
+function renderMultipartCompleteXml(bucketName: string, key: string, etag: string, checksumCrc32?: string | null): string {
   return `<?xml version="1.0" encoding="UTF-8"?>
 <CompleteMultipartUploadResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
   <Bucket>${escapeXml(bucketName)}</Bucket>
   <Key>${escapeXml(key)}</Key>
-  <ETag>${etag}</ETag>
+  <ETag>${etag}</ETag>${checksumCrc32 ? `\n  <ChecksumCRC32>${checksumCrc32}</ChecksumCRC32>` : ''}
 </CompleteMultipartUploadResult>`;
 }
 
@@ -61,6 +62,34 @@ function contentMd5Mismatch(headers: Record<string, unknown>, etag: string): str
     return renderS3ErrorXml('BadDigest', 'The Content-MD5 you specified did not match what we received.');
   }
   return null;
+}
+
+// Validate a request's x-amz-checksum-crc32 header (base64 of the 4-byte
+// CRC-32) against what the storage engine computed over the plaintext. A
+// malformed header is InvalidRequest; a mismatch is BadDigest (same family as
+// the Content-MD5 check). Absent header → no check, matching AWS behavior.
+function checksumCrc32Mismatch(headers: Record<string, unknown>, computedBase64: string): string | null {
+  const raw = (headers['x-amz-checksum-crc32'] as string | undefined)?.trim();
+  if (!raw) return null;
+  const supplied = Buffer.from(raw, 'base64');
+  if (supplied.length === 0 || supplied.toString('base64') !== raw) {
+    return renderS3ErrorXml('InvalidRequest', 'The x-amz-checksum-crc32 header is not valid base64 of a CRC-32.');
+  }
+  const computed = Buffer.from(computedBase64, 'base64');
+  if (computed.length !== supplied.length || !crypto.timingSafeEqual(computed, supplied)) {
+    return renderS3ErrorXml('BadDigest', 'The checksum you specified did not match what we received.');
+  }
+  return null;
+}
+
+// Reads the optional x-amz-checksum-mode header (ENABLED/FULL ask for the
+// object's checksum on GET/HEAD). Returns 'enabled' | null, or a sentinel
+// when the value is invalid so the caller can 400 it like AWS.
+function checksumMode(headers: Record<string, unknown>): 'enabled' | 'none' | 'invalid' {
+  const raw = (headers['x-amz-checksum-mode'] as string | undefined)?.trim().toLowerCase();
+  if (!raw) return 'none';
+  if (raw === 'enabled' || raw === 'full') return 'enabled';
+  return 'invalid';
 }
 
 function permissionDenied(auth: AuthResult, bucketName: string, required: 'read' | 'write' | 'full'): string | null {
@@ -334,6 +363,16 @@ export async function s3Routes(fastify: FastifyInstance) {
       }
     }
 
+    // x-amz-checksum-mode (GET/HEAD) asks for the object's integrity checksum;
+    // aws-sdk-v3 sends it with default checksum settings. ENABLED/FULL are
+    // accepted; anything else is rejected like AWS (400 InvalidArgument).
+    const mode = checksumMode(req.headers as Record<string, unknown>);
+    if (mode === 'invalid') {
+      return reply.status(400).type('application/xml').send(
+        renderS3ErrorXml('InvalidArgument', 'x-amz-checksum-mode only supports ENABLED and FULL.')
+      );
+    }
+
     // GetObjectTagging (?tagging): returns the stored tag set as XML (empty
     // TagSet when none) and 404 when the object is missing.
     if (query['tagging'] !== undefined) {
@@ -346,20 +385,24 @@ export async function s3Routes(fastify: FastifyInstance) {
 
     // GetObjectAttributes (?attributes): compact object fingerprint used by
     // newer SDKs (aws-sdk-v3's GetObjectAttributesCommand). Only elements with
-    // data are emitted; no separate checksum is tracked, so <Checksum/> and
-    // <ObjectParts/> are omitted (the ETag md5 is the integrity marker).
+    // data are emitted; the Checksum block appears only when the caller asks
+    // (x-amz-checksum-mode) AND the object has a stored CRC-32.
     if (query['attributes'] !== undefined) {
       const attrObj = await db.object.findUnique({ where: { bucketName_key: { bucketName, key } } });
       if (!attrObj) {
         return reply.status(404).type('application/xml').send(renderS3ErrorXml('NoSuchKey', 'The specified key does not exist.'));
       }
+      const attrChecksum =
+        mode === 'enabled' && attrObj.checksumCrc32
+          ? `\n  <Checksum>\n    <ChecksumCRC32>${attrObj.checksumCrc32}</ChecksumCRC32>\n  </Checksum>`
+          : '';
       return reply.status(200).type('application/xml').send(
         `<?xml version="1.0" encoding="UTF-8"?>
 <GetObjectAttributesResponse xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
   <ETag>${attrObj.etag}</ETag>
   <StorageClass>STANDARD</StorageClass>
   <ObjectSize>${attrObj.size}</ObjectSize>
-  <LastModified>${attrObj.updatedAt.toISOString()}</LastModified>
+  <LastModified>${attrObj.updatedAt.toISOString()}</LastModified>${attrChecksum}
 </GetObjectAttributesResponse>`
       );
     }
@@ -434,6 +477,14 @@ export async function s3Routes(fastify: FastifyInstance) {
     // S3 reports the number of tags on a GetObject response.
     const count = tagCount(obj.tags);
     if (count > 0) reply.header('x-amz-tagging-count', String(count));
+
+    // Checksum request honored: report the stored CRC-32 (aws-sdk-v3 verifies
+    // integrity against it). Legacy objects without a stored checksum simply
+    // omit the headers, like objects S3 never checksummed.
+    if (mode === 'enabled' && obj.checksumCrc32) {
+      reply.header('x-amz-checksum-crc32', obj.checksumCrc32);
+      reply.header('x-amz-checksum-type', 'FULL_OBJECT');
+    }
 
     // Presigned-URL response overrides (response-content-type etc.): clients
     // bake these into the query string of a presigned GET.
@@ -761,6 +812,7 @@ export async function s3Routes(fastify: FastifyInstance) {
           storagePath,
           metadata: destMetadata,
           tags: destTags,
+          checksumCrc32: srcObj.checksumCrc32,
         },
         update: {
           size: srcObj.size,
@@ -769,6 +821,7 @@ export async function s3Routes(fastify: FastifyInstance) {
           storagePath,
           metadata: destMetadata,
           tags: destTags,
+          checksumCrc32: srcObj.checksumCrc32,
           updatedAt: new Date(),
         },
       });
@@ -818,6 +871,12 @@ export async function s3Routes(fastify: FastifyInstance) {
       await storageEngine.deleteObjectFile(part.storagePath);
       return reply.status(400).type('application/xml').send(md5Error);
     }
+    // Same for the CRC-32 checksum header aws-sdk-v3 sends on part uploads.
+    const crcError = checksumCrc32Mismatch(req.headers as Record<string, unknown>, part.crc32);
+    if (crcError) {
+      await storageEngine.deleteObjectFile(part.storagePath);
+      return reply.status(400).type('application/xml').send(crcError);
+    }
 
       await db.multipartPart.upsert({
         where: { uploadId_partNumber: { uploadId, partNumber } },
@@ -858,7 +917,7 @@ export async function s3Routes(fastify: FastifyInstance) {
       );
     }
 
-    const { size, etag, storagePath } = await storageEngine.saveObjectFromStream(bucketName, key, bodyAsStream(req.body));
+    const { size, etag, storagePath, crc32 } = await storageEngine.saveObjectFromStream(bucketName, key, bodyAsStream(req.body));
 
     // Content-MD5 integrity check: the ETag is the md5 of the payload, so a
     // mismatching header means corrupted (or tampered) bytes in flight — reject
@@ -867,6 +926,14 @@ export async function s3Routes(fastify: FastifyInstance) {
     if (md5Error) {
       await storageEngine.deleteObjectFile(storagePath);
       return reply.status(400).type('application/xml').send(md5Error);
+    }
+    // aws-sdk-v3 sends x-amz-checksum-crc32 (base64 CRC-32) on every PutObject
+    // by default since 2024; verify it the same way and store it so GET with
+    // x-amz-checksum-mode can return it.
+    const crcError = checksumCrc32Mismatch(req.headers as Record<string, unknown>, crc32);
+    if (crcError) {
+      await storageEngine.deleteObjectFile(storagePath);
+      return reply.status(400).type('application/xml').send(crcError);
     }
 
     // x-amz-tagging stores tags alongside the object on PUT.
@@ -902,6 +969,7 @@ export async function s3Routes(fastify: FastifyInstance) {
         storagePath,
         metadata: serializeMetadata(extractMetadataFromHeaders(req.headers as Record<string, unknown>)),
         tags: storedTags,
+        checksumCrc32: crc32,
       },
       update: {
         size,
@@ -910,6 +978,7 @@ export async function s3Routes(fastify: FastifyInstance) {
         storagePath,
         metadata: serializeMetadata(extractMetadataFromHeaders(req.headers as Record<string, unknown>)),
         tags: storedTags,
+        checksumCrc32: crc32,
         updatedAt: new Date(),
       },
     });
@@ -1095,7 +1164,7 @@ export async function s3Routes(fastify: FastifyInstance) {
       );
     }
 
-    const { size, etag, storagePath } = await storageEngine.assembleUpload(bucketName, key, partsToUse);
+    const { size, etag, storagePath, crc32 } = await storageEngine.assembleUpload(bucketName, key, partsToUse);
 
     await db.object.upsert({
       where: { bucketName_key: { bucketName, key } },
@@ -1108,6 +1177,7 @@ export async function s3Routes(fastify: FastifyInstance) {
         storagePath,
         metadata: upload.metadata,
         tags: upload.tags,
+        checksumCrc32: crc32,
       },
       update: {
         size,
@@ -1116,6 +1186,7 @@ export async function s3Routes(fastify: FastifyInstance) {
         storagePath,
         metadata: upload.metadata,
         tags: upload.tags,
+        checksumCrc32: crc32,
         updatedAt: new Date(),
       },
     });
@@ -1123,7 +1194,7 @@ export async function s3Routes(fastify: FastifyInstance) {
     await db.multipartUpload.delete({ where: { uploadId } });
     await storageEngine.deleteUploadParts(uploadId);
 
-    return reply.status(200).type('application/xml').send(renderMultipartCompleteXml(bucketName, key, etag));
+    return reply.status(200).type('application/xml').send(renderMultipartCompleteXml(bucketName, key, etag, crc32));
   });
 
   // 7. POST /s3/:bucket?delete (DeleteObjects batch)

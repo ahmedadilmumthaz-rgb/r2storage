@@ -27,6 +27,7 @@ model Object {
   storagePath String
   metadata    String?  // JSON stringified custom metadata
   tags        String?  // JSON stringified object tags (x-amz-tagging)
+  checksumCrc32 String? // base64 CRC-32 of the plaintext (x-amz-checksum-crc32), null for legacy objects
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 

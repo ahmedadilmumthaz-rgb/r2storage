@@ -3,6 +3,7 @@ import path from 'path';
 import crypto from 'crypto';
 import { CONFIG } from '../config';
 import { EncryptedWrite, openEncryptedRead, encryptionEnabled, maybeDecryptBuffer, maybeEncryptBuffer, sliceStream } from './crypto';
+import { Crc32 } from './crc32';
 
 export class StorageEngine {
   private baseDir: string;
@@ -24,23 +25,27 @@ export class StorageEngine {
     return path.join(dir, keyHash);
   }
 
-  async saveObject(bucketName: string, key: string, buffer: Buffer): Promise<{ size: number; etag: string; storagePath: string }> {
+  async saveObject(bucketName: string, key: string, buffer: Buffer): Promise<{ size: number; etag: string; storagePath: string; crc32: string }> {
     const filePath = this.getFilePath(bucketName, key);
     // Encrypt at rest when a key is configured; the ETag stays the MD5 of the
     // *plaintext* so it matches what S3 clients compute from the payload.
     await fs.promises.writeFile(filePath, maybeEncryptBuffer(buffer));
     const md5 = crypto.createHash('md5').update(buffer).digest('hex');
+    const crc = new Crc32();
+    crc.update(buffer);
     return {
       size: buffer.length,
       etag: `"${md5}"`,
       storagePath: filePath,
+      crc32: crc.digest(),
     };
   }
 
-  async saveObjectFromStream(bucketName: string, key: string, stream: NodeJS.ReadableStream): Promise<{ size: number; etag: string; storagePath: string }> {
+  async saveObjectFromStream(bucketName: string, key: string, stream: NodeJS.ReadableStream): Promise<{ size: number; etag: string; storagePath: string; crc32: string }> {
     const filePath = this.getFilePath(bucketName, key);
     const tmpPath = filePath + '.tmp-' + process.pid + '-' + Date.now();
     const hash = crypto.createHash('md5');
+    const crc = new Crc32();
     let size = 0;
 
     try {
@@ -55,6 +60,7 @@ export class StorageEngine {
           stream.on('data', (chunk: Buffer) => {
             size += chunk.length;
             hash.update(chunk);
+            crc.update(chunk);
             ew.write(chunk);
           });
           stream.on('end', () => ew.end());
@@ -62,6 +68,7 @@ export class StorageEngine {
           stream.on('data', (chunk: Buffer) => {
             size += chunk.length;
             hash.update(chunk);
+            crc.update(chunk);
           });
           stream.pipe(writeStream);
         }
@@ -72,7 +79,7 @@ export class StorageEngine {
     }
 
     await fs.promises.rename(tmpPath, filePath);
-    return { size, etag: `"${hash.digest('hex')}"`, storagePath: filePath };
+    return { size, etag: `"${hash.digest('hex')}"`, storagePath: filePath, crc32: crc.digest() };
   }
 
   private getPartPath(uploadId: string, partNumber: number): string {
@@ -83,9 +90,10 @@ export class StorageEngine {
     return path.join(dir, String(partNumber));
   }
 
-  async savePartFromStream(uploadId: string, partNumber: number, stream: NodeJS.ReadableStream): Promise<{ etag: string; size: number; storagePath: string }> {
+  async savePartFromStream(uploadId: string, partNumber: number, stream: NodeJS.ReadableStream): Promise<{ etag: string; size: number; storagePath: string; crc32: string }> {
     const partPath = this.getPartPath(uploadId, partNumber);
     const hash = crypto.createHash('md5');
+    const crc = new Crc32();
     let size = 0;
 
     try {
@@ -99,6 +107,7 @@ export class StorageEngine {
           stream.on('data', (chunk: Buffer) => {
             size += chunk.length;
             hash.update(chunk);
+            crc.update(chunk);
             ew.write(chunk);
           });
           stream.on('end', () => ew.end());
@@ -106,6 +115,7 @@ export class StorageEngine {
           stream.on('data', (chunk: Buffer) => {
             size += chunk.length;
             hash.update(chunk);
+            crc.update(chunk);
           });
           stream.pipe(writeStream);
         }
@@ -115,17 +125,18 @@ export class StorageEngine {
       throw err;
     }
 
-    return { etag: `"${hash.digest('hex')}"`, size, storagePath: partPath };
+    return { etag: `"${hash.digest('hex')}"`, size, storagePath: partPath, crc32: crc.digest() };
   }
 
   async assembleUpload(
     bucketName: string,
     key: string,
     parts: Array<{ storagePath: string; partNumber: number }>
-  ): Promise<{ size: number; etag: string; storagePath: string }> {
+  ): Promise<{ size: number; etag: string; storagePath: string; crc32: string }> {
     const filePath = this.getFilePath(bucketName, key);
     const tmpPath = filePath + '.tmp-' + process.pid + '-' + Date.now();
     const hash = crypto.createHash('md5');
+    const crc = new Crc32();
     let size = 0;
 
     try {
@@ -142,6 +153,7 @@ export class StorageEngine {
             const data = maybeDecryptBuffer(await fs.promises.readFile(part.storagePath));
             size += data.length;
             hash.update(data);
+            crc.update(data);
             if (!ew.write(data)) {
               await new Promise<void>((res) => writeStream.once('drain', () => res()));
             }
@@ -155,7 +167,7 @@ export class StorageEngine {
     }
 
     await fs.promises.rename(tmpPath, filePath);
-    return { size, etag: `"${hash.digest('hex')}"`, storagePath: filePath };
+    return { size, etag: `"${hash.digest('hex')}"`, storagePath: filePath, crc32: crc.digest() };
   }
 
   async deleteUploadParts(uploadId: string): Promise<void> {

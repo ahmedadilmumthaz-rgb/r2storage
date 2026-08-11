@@ -77,6 +77,11 @@ json_field() { # json_field <json> <field>
   printf '%s' "$1" | node -p "JSON.parse(require('fs').readFileSync(0)).$2 ?? ''"
 }
 
+# base64 CRC-32 of an ASCII payload (matches S3's x-amz-checksum-crc32 header).
+crc32_of() {
+  node -e 'const t=new Uint32Array(256);for(let n=0;n<256;n++){let c=n;for(let k=0;k<8;k++)c=c&1?0xedb88320^(c>>>1):c>>>1;t[n]=c>>>0}let r=0xffffffff;const s=process.argv[1];for(let i=0;i<s.length;i++){r=(t[(r^s.charCodeAt(i))&0xff]^(r>>>8))>>>0}const x=(r^0xffffffff)>>>0;process.stdout.write(Buffer.from([x>>>24,(x>>>16)&0xff,(x>>>8)&0xff,x&0xff]).toString("base64"))' "$1"
+}
+
 # --- start the throwaway server ---------------------------------------------
 if [ -z "$SMOKE_URL" ]; then
 echo "== applying schema (prisma db push) =="
@@ -389,6 +394,17 @@ check "PUT with wrong Content-MD5 -> 400" "400" "$(status_of -X PUT "${AUTH_OPTS
 check "rejected Content-MD5 object not stored" "404" "$(status_of "${AUTH_OPTS[@]}" "$B/s3/smoke/md5bad.txt")"
 check "PUT with malformed Content-MD5 -> 400" "400" "$(status_of -X PUT "${AUTH_OPTS[@]}" -H 'Content-MD5: not-base64!!' --data-binary 'md5-check' "$B/s3/smoke/md5bad2.txt")"
 
+# --- CRC-32 checksums (aws-sdk-v3 default) ---------------------------------
+CRC_OK="$(crc32_of 'crc-check')"
+check "PUT with correct x-amz-checksum-crc32" "200" "$(status_of -X PUT "${AUTH_OPTS[@]}" -H "x-amz-checksum-crc32: $CRC_OK" --data-binary 'crc-check' "$B/s3/smoke/crccheck.txt")"
+check "GET checksum-mode echoes x-amz-checksum-crc32" "$CRC_OK" "$(curl -s -D - -o /dev/null "${AUTH_OPTS[@]}" -H 'x-amz-checksum-mode: enabled' "$B/s3/smoke/crccheck.txt" | grep -i '^x-amz-checksum-crc32:' | tr -d '\r' | cut -d' ' -f2-)"
+check "GET checksum-mode reports FULL_OBJECT type" "1" "$(curl -s -D - -o /dev/null "${AUTH_OPTS[@]}" -H 'x-amz-checksum-mode: enabled' "$B/s3/smoke/crccheck.txt" | grep -ci '^x-amz-checksum-type: FULL_OBJECT')"
+check "GET without checksum-mode omits checksum header" "0" "$(curl -s -D - -o /dev/null "${AUTH_OPTS[@]}" "$B/s3/smoke/crccheck.txt" | grep -ci '^x-amz-checksum-crc32:')"
+check "GET checksum-mode invalid value -> 400" "400" "$(status_of "${AUTH_OPTS[@]}" -H 'x-amz-checksum-mode: bogus' "$B/s3/smoke/crccheck.txt")"
+check "PUT with wrong x-amz-checksum-crc32 -> 400" "400" "$(status_of -X PUT "${AUTH_OPTS[@]}" -H 'x-amz-checksum-crc32: AAAA==' --data-binary 'crc-check' "$B/s3/smoke/crcbad.txt")"
+check "rejected checksum object not stored" "404" "$(status_of "${AUTH_OPTS[@]}" "$B/s3/smoke/crcbad.txt")"
+check "CopyObject inherits source checksum" "$CRC_OK" "$(curl -s -o /dev/null -X PUT "${AUTH_OPTS[@]}" -H 'x-amz-copy-source: /smoke/crccheck.txt' "$B/s3/smoke/crc-copy.txt"; curl -s -D - -o /dev/null "${AUTH_OPTS[@]}" -H 'x-amz-checksum-mode: enabled' "$B/s3/smoke/crc-copy.txt" | grep -i '^x-amz-checksum-crc32:' | tr -d '\r' | cut -d' ' -f2-)"
+
 # --- object tags -----------------------------------------------------------------
 echo "== object tags =="
 printf 'tagged' > "$TMP/tagged.txt"
@@ -421,6 +437,7 @@ check "bucket ?replication -> 501" "501" "$(status_of "${AUTH_OPTS[@]}" "$B/s3/s
 check "listing unaffected by subresources" "1" "$(curl -s "${AUTH_OPTS[@]}" "$B/s3/smoke" | grep -c '<ListBucketResult')"
 check "GetObjectAttributes" "1" "$(curl -s "${AUTH_OPTS[@]}" "$B/s3/smoke/hello.txt?attributes" | grep -c '<GetObjectAttributesResponse')"
 check "GetObjectAttributes size" "18" "$(curl -s "${AUTH_OPTS[@]}" "$B/s3/smoke/hello.txt?attributes" | sed -n 's:.*<ObjectSize>\([0-9]*\)</ObjectSize>.*:\1:p')"
+check "GetObjectAttributes checksum block" "1" "$(curl -s "${AUTH_OPTS[@]}" -H 'x-amz-checksum-mode: enabled' "$B/s3/smoke/crccheck.txt?attributes" | grep -c '<ChecksumCRC32>')"
 check "GetObjectAttributes missing -> 404" "404" "$(status_of "${AUTH_OPTS[@]}" "$B/s3/smoke/nope.txt?attributes")"
 
 # --- multipart ------------------------------------------------------------------
@@ -448,6 +465,12 @@ check "ListParts not truncated" "false" "$(printf '%s' "$LPXML" | sed -n 's:.*<I
 check "ListParts unknown upload -> 404" "404" "$(status_of -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" "$B/s3/smoke/big.bin?uploadId=nope")"
 check "ListMultipartUploads shows in-progress upload" "1" "$(curl -s -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" "$B/s3/smoke?uploads" | grep -c "$UPLOAD_ID")"
 
+# UploadPart checksum integrity (part 3 is uploaded but never completed, so the
+# assembled big.bin stays part-one+part-two).
+PC_OK="$(crc32_of 'part-three')"
+check "UploadPart with correct x-amz-checksum-crc32" "200" "$(status_of -X PUT -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" -H "x-amz-checksum-crc32: $PC_OK" --data-binary 'part-three' "$B/s3/smoke/big.bin?partNumber=3&uploadId=$UPLOAD_ID")"
+check "UploadPart wrong x-amz-checksum-crc32 -> 400" "400" "$(status_of -X PUT -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" -H 'x-amz-checksum-crc32: AAAA==' --data-binary 'part-three' "$B/s3/smoke/big.bin?partNumber=3&uploadId=$UPLOAD_ID")"
+
 # UploadPartCopy: a part sourced from an existing object (full or byte range).
 echo "== UploadPartCopy =="
 printf '0123456789abcdef' > "$TMP/copy-src.bin"
@@ -466,10 +489,12 @@ check "UploadPartCopy complete" "200" "$(status_of -X POST -H "x-access-key-id: 
 check "UploadPartCopy assembled content" "0123456789abcdef01234567" "$(curl -s -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" "$B/s3/smoke/copied.bin")"
 
 COMPLETE_XML="<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>$ETAG1</ETag></Part><Part><PartNumber>2</PartNumber><ETag>$ETAG2</ETag></Part></CompleteMultipartUpload>"
-curl -s -o /dev/null -X POST -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" -H "Content-Type: application/xml" --data "$COMPLETE_XML" "$B/s3/smoke/big.bin?uploadId=$UPLOAD_ID"
+COMPLETE_R="$(curl -s -X POST -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" -H "Content-Type: application/xml" --data "$COMPLETE_XML" "$B/s3/smoke/big.bin?uploadId=$UPLOAD_ID")"
+check "multipart complete reports ChecksumCRC32" "1" "$(printf '%s' "$COMPLETE_R" | grep -c '<ChecksumCRC32>')"
 R=$(curl -s -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" "$B/s3/smoke/big.bin")
 check "multipart assembled" "part-onepart-two" "$R"
 check "multipart object carries initiate-time tags" "1" "$(curl -s -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" "$B/s3/smoke/big.bin?tagging" | grep -c '<Key>mp</Key><Value>1</Value>')"
+check "multipart GET checksum matches plaintext" "$(crc32_of 'part-onepart-two')" "$(curl -s -D - -o /dev/null -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" -H 'x-amz-checksum-mode: enabled' "$B/s3/smoke/big.bin" | grep -i '^x-amz-checksum-crc32:' | tr -d '\r' | cut -d' ' -f2-)"
 # The assembled object must also be encrypted on disk (multipart parts decrypt
 # and re-encrypt during assembly). Check the magic of every stored blob.
 ALLENC="$(find "$STORE/smoke" -type f | while read -r f; do head -c 6 "$f" | xxd -p; done | sort -u)"
