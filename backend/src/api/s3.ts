@@ -6,7 +6,7 @@ import { wouldExceedQuota } from '../quota';
 import mime from 'mime-types';
 import crypto from 'crypto';
 import { Readable } from 'stream';
-import { parseRangeHeader, notModified } from './range';
+import { parseRangeHeader, notModified, checkWritePreconditions } from './range';
 
 function bodyAsStream(body: unknown): NodeJS.ReadableStream {
   if (body && typeof (body as any).pipe === 'function') {
@@ -236,6 +236,20 @@ export async function s3Routes(fastify: FastifyInstance) {
       where: { bucketName_key: { bucketName, key } },
     });
 
+    // Conditional writes: If-Match / If-None-Match: * / If-Unmodified-Since.
+    // Checked before streaming the body so a failed precondition never
+    // consumes the payload.
+    const precondition = checkWritePreconditions(
+      req.headers as Record<string, unknown>,
+      existing ? { etag: existing.etag, updatedAt: existing.updatedAt } : null,
+    );
+    if (precondition === 'precondition-failed') {
+      return reply.status(412).type('application/xml').send(renderS3ErrorXml('PreconditionFailed', 'At least one of the pre-conditions you specified did not hold'));
+    }
+    if (precondition === 'conflict') {
+      return reply.status(409).type('application/xml').send(renderS3ErrorXml('ConditionalRequestConflict', 'The conditional request cannot succeed because the object already exists'));
+    }
+
     // Early reject when the declared Content-Length already exceeds the quota
     // (avoids streaming a payload we know we will refuse).
     const contentLength = parseInt((req.headers['content-length'] as string) || '0', 10);
@@ -407,6 +421,20 @@ export async function s3Routes(fastify: FastifyInstance) {
     const existingObj = await db.object.findUnique({
       where: { bucketName_key: { bucketName, key } },
     });
+
+    // Conditional writes apply to completion too (the upload's object already
+    // exists). Same 412/409 semantics as PutObject.
+    const precondition = checkWritePreconditions(
+      req.headers as Record<string, unknown>,
+      existingObj ? { etag: existingObj.etag, updatedAt: existingObj.updatedAt } : null,
+    );
+    if (precondition === 'precondition-failed') {
+      return reply.status(412).type('application/xml').send(renderS3ErrorXml('PreconditionFailed', 'At least one of the pre-conditions you specified did not hold'));
+    }
+    if (precondition === 'conflict') {
+      return reply.status(409).type('application/xml').send(renderS3ErrorXml('ConditionalRequestConflict', 'The conditional request cannot succeed because the object already exists'));
+    }
+
     if (await wouldExceedQuota(assembledSize, existingObj?.size || 0)) {
       return reply.status(507).type('application/xml').send(
         renderS3ErrorXml('InsufficientStorage', 'Storage quota exceeded. Delete objects or upgrade your plan to free up space.')

@@ -83,13 +83,13 @@ GET|PUT|HEAD|POST|DELETE  /s3/<bucket>[/<key>][?query]
 | Operation | Method + path | Auth | Notes |
 | --- | --- | --- | --- |
 | ListObjectsV2 | `GET /s3/<bucket>?prefix=<p>` | public buckets: none; private: read | XML `<ListBucketResult>`; up to 1000 keys |
-| PutObject | `PUT /s3/<bucket>/<key>` | write | body is streamed to disk; returns `ETag` header |
+| PutObject | `PUT /s3/<bucket>/<key>` | write | body is streamed to disk; returns `ETag` header; supports conditional writes (below) |
 | GetObject | `GET /s3/<bucket>/<key>` | public: none; private: read | streams body; sets `Content-Type`, `ETag`, `Content-Length`; supports **byte-range + conditional GET** (below) |
 | HeadObject | `HEAD /s3/<bucket>/<key>` | public: none; private: read | headers only, no body |
 | DeleteObject | `DELETE /s3/<bucket>/<key>` | **full** | `204` |
 | CreateMultipartUpload | `POST /s3/<bucket>/<key>?uploads` | write | XML with `<UploadId>` |
 | UploadPart | `PUT /s3/<bucket>/<key>?uploadId=<id>&partNumber=<n>` | write | returns `ETag` header |
-| CompleteMultipartUpload | `POST /s3/<bucket>/<key>?uploadId=<id>` | write | XML body `<CompleteMultipartUpload>`; returns XML result. Body capped at 1MB (413) — it's only a part list. |
+| CompleteMultipartUpload | `POST /s3/<bucket>/<key>?uploadId=<id>` | write | XML body `<CompleteMultipartUpload>`; returns XML result. Body capped at 1MB (413) — it's only a part list. Honors the same conditional-write headers as PutObject. |
 | AbortMultipartUpload | `DELETE /s3/<bucket>/<key>?uploadId=<id>` | write | `204` |
 
 ### 2.2 Response conventions
@@ -99,7 +99,7 @@ GET|PUT|HEAD|POST|DELETE  /s3/<bucket>[/<key>][?query]
   ```xml
   <Error><Code>NoSuchKey</Code><Message>The specified key does not exist.</Message></Error>
   ```
-- Common codes: `AccessDenied` (403), `NoSuchBucket` / `NoSuchKey` (404), `NoSuchUpload` (404), `InvalidPart` / `InvalidPartOrder` (400), `InvalidRequest` (400).
+- Common codes: `AccessDenied` (403), `NoSuchBucket` / `NoSuchKey` (404), `NoSuchUpload` (404), `InvalidPart` / `InvalidPartOrder` (400), `InvalidRequest` (400), `PreconditionFailed` (412), `ConditionalRequestConflict` (409).
 
 ### 2.3 Range + conditional GET
 
@@ -114,7 +114,19 @@ GET|PUT|HEAD|POST|DELETE  /s3/<bucket>[/<key>][?query]
 
 `ETag` values are quoted MD5-of-plaintext (e.g. `"9c2e4d5f..."`); `Accept-Ranges: bytes` is advertised on object GETs. Range reads of encrypted blobs decrypt in full then slice (whole-file GCM can't seek), so ranged requests on huge encrypted objects are CPU-bound.
 
-### 2.3 Public vs private buckets
+### 2.4 Conditional writes
+
+`PutObject` and `CompleteMultipartUpload` accept S3-style conditional-write headers, evaluated against the current object **before** the body is streamed — a failed precondition never consumes the payload:
+
+| Header | Object state | Result |
+|---|---|---|
+| `If-Match: "<etag>"` (or `*`, or a comma list) | ETag doesn't match current (or object missing) | `412 PreconditionFailed` |
+| `If-Unmodified-Since: <http-date>` | Modified after the date | `412 PreconditionFailed` (a missing object always passes) |
+| `If-None-Match: *` | Object already exists | `409 ConditionalRequestConflict` |
+
+`If-Match` takes precedence over `If-Unmodified-Since`. On success the write proceeds normally (object replaced/created).
+
+### 2.5 Public vs private buckets
 
 - **Public bucket**: list/GET/HEAD need no auth; writes and deletes still require a valid key.
 - **Private bucket**: everything requires auth. Signed-out `GET` returns `403 AccessDenied`.

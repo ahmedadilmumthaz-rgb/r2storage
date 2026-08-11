@@ -58,3 +58,45 @@ export function notModified(
   }
   return false;
 }
+
+// Write-precondition evaluation (conditional writes). Mirrors S3's PutObject
+// semantics: If-Match and If-Unmodified-Since fail with 412 PreconditionFailed
+// when the current object doesn't match, and If-None-Match: * fails with
+// 409 Conflict (ConditionalRequestConflict) when the object already exists.
+// If-Match takes precedence over If-Unmodified-Since (RFC 7232 §3.4).
+export type WritePrecondition = 'ok' | 'precondition-failed' | 'conflict';
+
+export function checkWritePreconditions(
+  headers: Record<string, unknown>,
+  existing: { etag: string; updatedAt: Date } | null,
+): WritePrecondition {
+  const normalized = (tag: string) => tag.trim().replace(/^W\//, '').replace(/^"(.*)"$/, '$1');
+
+  const ifMatch = headers['if-match'];
+  if (typeof ifMatch === 'string' && ifMatch) {
+    if (!existing) return 'precondition-failed';
+    if (ifMatch.trim() === '*') return 'ok';
+    const et = normalized(existing.etag);
+    return ifMatch.split(',').some((tag) => normalized(tag) === et) ? 'ok' : 'precondition-failed';
+  }
+
+  const ifUnmodified = headers['if-unmodified-since'];
+  if (typeof ifUnmodified === 'string' && ifUnmodified) {
+    const since = Date.parse(ifUnmodified);
+    if (Number.isNaN(since)) return 'ok';
+    if (!existing) return 'ok'; // a brand-new key is trivially unmodified
+    const modified = Math.floor(existing.updatedAt.getTime() / 1000);
+    return modified <= Math.floor(since / 1000) ? 'ok' : 'precondition-failed';
+  }
+
+  const ifNoneMatch = headers['if-none-match'];
+  if (typeof ifNoneMatch === 'string' && ifNoneMatch) {
+    const tag = ifNoneMatch.trim();
+    if (tag === '*' && existing) return 'conflict';
+    // S3 only honors the bare `*` form on writes; a specific tag isn't
+    // supported, so treat any other value as unsatisfiable if it matches.
+    if (tag !== '*' && existing && normalized(tag) === normalized(existing.etag)) return 'conflict';
+  }
+
+  return 'ok';
+}

@@ -256,6 +256,23 @@ check "If-Modified-Since now -> 304" "304" "$(status_of "${AUTH_OPTS[@]}" -H "If
 check "If-Modified-Since past -> 200" "200" "$(status_of "${AUTH_OPTS[@]}" -H 'If-Modified-Since: Sat, 01 Jan 2000 00:00:00 GMT' "$B/s3/smoke/hello.txt")"
 check "304 sends ETag header" "1" "$(curl -s -D - -o /dev/null "${AUTH_OPTS[@]}" -H "If-None-Match: $ETAG" "$B/s3/smoke/hello.txt" | grep -ic '^etag:')"
 
+# --- conditional writes ---------------------------------------------------------
+echo "== conditional writes =="
+printf 'first' > "$TMP/cond.txt"
+check "PUT baseline cond.txt" "200" "$(status_of -X PUT "${AUTH_OPTS[@]}" --data-binary @"$TMP/cond.txt" "$B/s3/smoke/cond.txt")"
+CETAG="$(curl -s -I "${AUTH_OPTS[@]}" "$B/s3/smoke/cond.txt" | grep -i '^etag:' | tr -d '\r' | cut -d' ' -f2)"
+[ -n "$CETAG" ] || { echo "✗ no cond.txt ETag"; exit 1; }
+check "If-Match wrong etag -> 412" "412" "$(status_of -X PUT "${AUTH_OPTS[@]}" -H 'If-Match: "bogus"' --data-binary 'second' "$B/s3/smoke/cond.txt")"
+check "failed If-Match did not overwrite" "first" "$(curl -s "${AUTH_OPTS[@]}" "$B/s3/smoke/cond.txt")"
+check "If-Match matching etag -> 200" "200" "$(status_of -X PUT "${AUTH_OPTS[@]}" -H "If-Match: $CETAG" --data-binary 'second' "$B/s3/smoke/cond.txt")"
+check "If-Match '*' proceeds on existing object" "200" "$(status_of -X PUT "${AUTH_OPTS[@]}" -H 'If-Match: *' --data-binary 'second' "$B/s3/smoke/cond.txt")"
+check "If-Unmodified-Since past -> 412" "412" "$(status_of -X PUT "${AUTH_OPTS[@]}" -H 'If-Unmodified-Since: Sat, 01 Jan 2000 00:00:00 GMT' --data-binary 'third' "$B/s3/smoke/cond.txt")"
+check "If-Unmodified-Since now -> 200" "200" "$(status_of -X PUT "${AUTH_OPTS[@]}" -H "If-Unmodified-Since: $(date -u +'%a, %d %b %Y %H:%M:%S GMT')" --data-binary 'third' "$B/s3/smoke/cond.txt")"
+check "If-None-Match * on existing -> 409" "409" "$(status_of -X PUT "${AUTH_OPTS[@]}" -H 'If-None-Match: *' --data-binary 'fourth' "$B/s3/smoke/cond.txt")"
+check "409 guard held (content unchanged)" "third" "$(curl -s "${AUTH_OPTS[@]}" "$B/s3/smoke/cond.txt")"
+check "If-None-Match * on new key -> 200" "200" "$(status_of -X PUT "${AUTH_OPTS[@]}" -H 'If-None-Match: *' --data-binary 'new' "$B/s3/smoke/cond2.txt")"
+check "If-None-Match * on missing -> object created" "new" "$(curl -s "${AUTH_OPTS[@]}" "$B/s3/smoke/cond2.txt")"
+
 # --- multipart ------------------------------------------------------------------
 echo "== multipart upload =="
 R=$(curl -s -X POST -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" "$B/s3/smoke/big.bin?uploads")
