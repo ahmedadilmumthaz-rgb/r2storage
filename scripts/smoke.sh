@@ -410,6 +410,19 @@ check "PUT with duplicate x-amz-tagging -> 400" "400" "$(status_of -X PUT "${AUT
 check "CopyObject COPY inherits tags" "1" "$(curl -s -o /dev/null -X PUT "${AUTH_OPTS[@]}" -H 'x-amz-tagging: color=red' --data-binary x "$B/s3/smoke/tagged2.txt"; curl -s -o /dev/null -X PUT "${AUTH_OPTS[@]}" -H 'x-amz-copy-source: /smoke/tagged2.txt' "$B/s3/smoke/tag-copy.txt"; curl -s "${AUTH_OPTS[@]}" "$B/s3/smoke/tag-copy.txt?tagging" | grep -c '<Key>color</Key><Value>red</Value>')"
 check "CopyObject REPLACE swaps tags" "1" "$(curl -s -o /dev/null -X PUT "${AUTH_OPTS[@]}" -H 'x-amz-copy-source: /smoke/tagged2.txt' -H 'x-amz-tagging-directive: REPLACE' -H 'x-amz-tagging: new=yes' "$B/s3/smoke/tag-replaced.txt"; curl -s "${AUTH_OPTS[@]}" "$B/s3/smoke/tag-replaced.txt?tagging" | grep -c '<Key>new</Key><Value>yes</Value>')"
 
+# --- bucket subresources + GetObjectAttributes -----------------------------------
+echo "== bucket subresources + GetObjectAttributes =="
+check "bucket ?versioning -> 200" "1" "$(curl -s "${AUTH_OPTS[@]}" "$B/s3/smoke?versioning" | grep -c '<VersioningConfiguration')"
+check "bucket ?acl -> 200" "1" "$(curl -s "${AUTH_OPTS[@]}" "$B/s3/smoke?acl" | grep -c '<AccessControlPolicy')"
+check "bucket ?cors -> 200" "1" "$(curl -s "${AUTH_OPTS[@]}" "$B/s3/smoke?cors" | grep -c '<AllowedOrigin>')"
+check "bucket ?policy -> 404" "404" "$(status_of "${AUTH_OPTS[@]}" "$B/s3/smoke?policy")"
+check "bucket ?lifecycle -> 404" "404" "$(status_of "${AUTH_OPTS[@]}" "$B/s3/smoke?lifecycle")"
+check "bucket ?replication -> 501" "501" "$(status_of "${AUTH_OPTS[@]}" "$B/s3/smoke?replication")"
+check "listing unaffected by subresources" "1" "$(curl -s "${AUTH_OPTS[@]}" "$B/s3/smoke" | grep -c '<ListBucketResult')"
+check "GetObjectAttributes" "1" "$(curl -s "${AUTH_OPTS[@]}" "$B/s3/smoke/hello.txt?attributes" | grep -c '<GetObjectAttributesResponse')"
+check "GetObjectAttributes size" "18" "$(curl -s "${AUTH_OPTS[@]}" "$B/s3/smoke/hello.txt?attributes" | sed -n 's:.*<ObjectSize>\([0-9]*\)</ObjectSize>.*:\1:p')"
+check "GetObjectAttributes missing -> 404" "404" "$(status_of "${AUTH_OPTS[@]}" "$B/s3/smoke/nope.txt?attributes")"
+
 # --- multipart ------------------------------------------------------------------
 echo "== multipart upload =="
 R=$(curl -s -X POST -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" -H 'x-amz-tagging: mp=1' "$B/s3/smoke/big.bin?uploads")

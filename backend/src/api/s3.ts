@@ -172,6 +172,74 @@ export async function s3Routes(fastify: FastifyInstance) {
       );
     }
 
+    // Bucket subresources probed by SDKs/tools on init. Without this, an
+    // unknown `?subresource` would silently fall through to a 200 object
+    // listing and corrupt client state. Respond with the correct "feature is
+    // off/not configured" body, or NotImplemented for genuinely unsupported
+    // operations — the S3-compliant way to signal "not here".
+    const subresource = (
+      ['versioning', 'acl', 'cors', 'policy', 'tagging', 'lifecycle', 'encryption', 'notification', 'replication', 'website'] as const
+    ).find((s) => query[s] !== undefined);
+    if (subresource) {
+      switch (subresource) {
+        case 'versioning':
+          return reply.status(200).type('application/xml').send(
+            `<?xml version="1.0" encoding="UTF-8"?>
+<VersioningConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"/>`
+          );
+        case 'acl':
+          return reply.status(200).type('application/xml').send(
+            `<?xml version="1.0" encoding="UTF-8"?>
+<AccessControlPolicy xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <Owner><ID>anon</ID><DisplayName>admin</DisplayName></Owner>
+  <AccessControlList>
+    <Grant>
+      <Grantee xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:type="CanonicalUser"><ID>anon</ID></Grantee>
+      <Permission>FULL_CONTROL</Permission>
+    </Grant>
+  </AccessControlList>
+</AccessControlPolicy>`
+          );
+        case 'cors':
+          if (!bucket.corsOrigins) {
+            return reply.status(404).type('application/xml').send(renderS3ErrorXml('NoSuchCORSConfiguration', 'The CORS configuration does not exist.'));
+          }
+          return reply.status(200).type('application/xml').send(
+            `<?xml version="1.0" encoding="UTF-8"?>
+<CORSConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <CORSRule>
+    <AllowedOrigin>${escapeXml(bucket.corsOrigins)}</AllowedOrigin>
+    <AllowedMethod>GET</AllowedMethod>
+    <AllowedMethod>HEAD</AllowedMethod>
+    <AllowedMethod>PUT</AllowedMethod>
+    <AllowedMethod>POST</AllowedMethod>
+    <AllowedMethod>DELETE</AllowedMethod>
+    <AllowedHeader>*</AllowedHeader>
+  </CORSRule>
+</CORSConfiguration>`
+          );
+        case 'policy':
+          return reply.status(404).type('application/xml').send(renderS3ErrorXml('NoSuchBucketPolicy', 'The bucket policy does not exist.'));
+        case 'tagging':
+          return reply.status(200).type('application/xml').send(
+            `<?xml version="1.0" encoding="UTF-8"?>
+<Tagging xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><TagSet/></Tagging>`
+          );
+        case 'lifecycle':
+          return reply.status(404).type('application/xml').send(renderS3ErrorXml('NoSuchLifecycleConfiguration', 'The lifecycle configuration does not exist.'));
+        case 'encryption':
+          return reply.status(404).type('application/xml').send(
+            renderS3ErrorXml('ServerSideEncryptionConfigurationNotFoundError', 'The server side encryption configuration was not found.')
+          );
+        case 'notification':
+          return reply.status(404).type('application/xml').send(renderS3ErrorXml('NotificationConfigurationNotFoundError', 'The notification configuration does not exist.'));
+        case 'replication':
+        case 'website':
+        default:
+          return reply.status(501).type('application/xml').send(renderS3ErrorXml('NotImplemented', 'This S3 operation is not supported.'));
+      }
+    }
+
     // ListObjectsV2
     const prefix = query['prefix'] || '';
     const delimiter = query['delimiter'] || '';
@@ -274,6 +342,26 @@ export async function s3Routes(fastify: FastifyInstance) {
         return reply.status(404).type('application/xml').send(renderS3ErrorXml('NoSuchKey', 'The specified key does not exist.'));
       }
       return reply.status(200).type('application/xml').send(renderTaggingXml(deserializeTags(tagObj.tags)));
+    }
+
+    // GetObjectAttributes (?attributes): compact object fingerprint used by
+    // newer SDKs (aws-sdk-v3's GetObjectAttributesCommand). Only elements with
+    // data are emitted; no separate checksum is tracked, so <Checksum/> and
+    // <ObjectParts/> are omitted (the ETag md5 is the integrity marker).
+    if (query['attributes'] !== undefined) {
+      const attrObj = await db.object.findUnique({ where: { bucketName_key: { bucketName, key } } });
+      if (!attrObj) {
+        return reply.status(404).type('application/xml').send(renderS3ErrorXml('NoSuchKey', 'The specified key does not exist.'));
+      }
+      return reply.status(200).type('application/xml').send(
+        `<?xml version="1.0" encoding="UTF-8"?>
+<GetObjectAttributesResponse xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <ETag>${attrObj.etag}</ETag>
+  <StorageClass>STANDARD</StorageClass>
+  <ObjectSize>${attrObj.size}</ObjectSize>
+  <LastModified>${attrObj.updatedAt.toISOString()}</LastModified>
+</GetObjectAttributesResponse>`
+      );
     }
 
     // ListParts: SDKs inspect an in-progress upload's parts before completing.
