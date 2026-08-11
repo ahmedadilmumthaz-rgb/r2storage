@@ -62,7 +62,7 @@ It speaks the **real S3 API** (SigV4 auth, multipart uploads, presigned URLs —
 | **Provisioning automation** | `docker run` → health wait → default bucket/keys → nginx map write + reload, with full rollback on failure. |
 | **Operational visibility** | Operator console with live per-tenant health/latency and quota; request logging + admin analytics. |
 | **Deploy automation** | One-command baremetal installer (per-instance systemd + nginx), Cloudflare-origin-cert TLS, per-instance backup cron. |
-| **Testing** | Backend smoke suite (**176 checks** — S3, multipart, copy, batch delete, object metadata, listing/subresources, presigned, ranges/conditionals, conditional writes, auth, rate limits) and a full-platform E2E smoke (`18 checks`), both runnable in CI. |
+| **Testing** | Backend smoke suite (**183 checks** — S3, multipart, copy, batch delete, object metadata, listing/subresources, presigned, ranges/conditionals, conditional writes, auth, rate limits) and a full-platform E2E smoke (`18 checks`), both runnable in CI. |
 
 ---
 
@@ -142,7 +142,7 @@ Open `http://localhost:5173` and log in with your `ADMIN_SECRET`.
 
 ```bash
 npm run build             # build backend + frontend
-npm test                  # backend smoke suite (176 checks, boots a throwaway instance)
+npm test                  # backend smoke suite (183 checks, boots a throwaway instance)
 bash scripts/sec-check.sh # ad-hoc security spot-checks (secret-less auth, presigned caps, login lockout)
 npm run test:platform     # platform E2E smoke — needs a running platform (see PLATFORM.md)
 ```

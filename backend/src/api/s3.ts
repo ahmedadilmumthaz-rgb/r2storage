@@ -25,12 +25,16 @@ function renderMultipartInitXml(bucketName: string, key: string, uploadId: strin
 </InitiateMultipartUploadResult>`;
 }
 
+// ETag values are server-generated `"hex"` strings (quotes + hex are legal
+// raw XML text), so no escaping is needed — escaping the quotes would corrupt
+// client round-trips (e.g. feeding a CopyPartResult ETag back into a
+// CompleteMultipartUpload).
 function renderMultipartCompleteXml(bucketName: string, key: string, etag: string): string {
   return `<?xml version="1.0" encoding="UTF-8"?>
 <CompleteMultipartUploadResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
   <Bucket>${escapeXml(bucketName)}</Bucket>
   <Key>${escapeXml(key)}</Key>
-  <ETag>${escapeXml(etag)}</ETag>
+  <ETag>${etag}</ETag>
 </CompleteMultipartUploadResult>`;
 }
 
@@ -448,6 +452,84 @@ export async function s3Routes(fastify: FastifyInstance) {
         }
       }
 
+      // UploadPartCopy — PUT ?uploadId=&partNumber= with an x-amz-copy-source
+      // copies the whole source (or an x-amz-copy-source-range slice) into a
+      // part of an in-progress upload. This is how SDKs copy large objects
+      // without pulling bytes through the client.
+      const uploadId = query['uploadId'];
+      const partNumber = query['partNumber'] !== undefined ? parseInt(query['partNumber'], 10) : NaN;
+      if (uploadId && Number.isInteger(partNumber) && partNumber >= 1) {
+        const upload = await db.multipartUpload.findUnique({ where: { uploadId } });
+        if (!upload) {
+          return reply.status(404).type('application/xml').send(renderS3ErrorXml('NoSuchUpload', 'The specified upload does not exist.'));
+        }
+
+        const rangeHeader = req.headers['x-amz-copy-source-range'] as string | undefined;
+        let copyStart = 0;
+        let copyEnd = srcObj.size - 1;
+        if (rangeHeader) {
+          const m = /^bytes=(\d+)-(\d+)$/.exec(rangeHeader);
+          if (!m) {
+            return reply.status(400).type('application/xml').send(
+              renderS3ErrorXml('InvalidArgument', 'The x-amz-copy-source-range header is malformed.')
+            );
+          }
+          const s = parseInt(m[1], 10);
+          const e = parseInt(m[2], 10);
+          if (s > e || s >= srcObj.size) {
+            return reply.status(400).type('application/xml').send(
+              renderS3ErrorXml('InvalidRange', 'The specified copy range is not satisfiable.')
+            );
+          }
+          copyStart = s;
+          copyEnd = Math.min(e, srcObj.size - 1);
+        }
+        const copyLength = copyEnd - copyStart + 1;
+
+        // Same part-time quota accounting as UploadPart (parts consume disk
+        // before completion; re-copying a part replaces its bytes).
+        const existingPart = await db.multipartPart.findUnique({
+          where: { uploadId_partNumber: { uploadId, partNumber } },
+        });
+        const partsSum = (await db.multipartPart.aggregate({ where: { uploadId }, _sum: { size: true } }))._sum.size || 0;
+        const addedBytes = partsSum - (existingPart?.size || 0) + copyLength;
+        if (addedBytes > 0 && (await wouldExceedQuota(addedBytes))) {
+          return reply.status(507).type('application/xml').send(
+            renderS3ErrorXml('InsufficientStorage', 'Storage quota exceeded. Delete objects or upgrade your plan to free up space.')
+          );
+        }
+
+        // The source blob is decrypted on read (magic detection) and the part
+        // re-encrypted via savePartFromStream, so the assembled object stays a
+        // clean plaintext+encrypt chain.
+        let stream: NodeJS.ReadableStream | null;
+        if (copyStart === 0 && copyEnd === srcObj.size - 1) {
+          stream = await storageEngine.getObjectStream(srcObj.storagePath);
+        } else {
+          stream = await storageEngine.getObjectStreamRange(srcObj.storagePath, copyStart, copyEnd);
+        }
+        if (!stream) {
+          return reply.status(404).type('application/xml').send(renderS3ErrorXml('NoSuchKey', 'Object storage file missing'));
+        }
+
+        const part = await storageEngine.savePartFromStream(uploadId, partNumber, stream);
+        await db.multipartPart.upsert({
+          where: { uploadId_partNumber: { uploadId, partNumber } },
+          create: { uploadId, partNumber, etag: part.etag, size: part.size, storagePath: part.storagePath },
+          update: { etag: part.etag, size: part.size, storagePath: part.storagePath, createdAt: new Date() },
+        });
+
+        reply.header('Access-Control-Allow-Origin', bucket.corsOrigins || '*');
+        reply.header('Access-Control-Expose-Headers', 'ETag');
+        return reply.status(200).type('application/xml').send(
+          `<?xml version="1.0" encoding="UTF-8"?>
+<CopyPartResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <ETag>${part.etag}</ETag>
+  <LastModified>${new Date().toISOString()}</LastModified>
+</CopyPartResult>`
+        );
+      }
+
       const directive = (req.headers['x-amz-metadata-directive'] as string || 'COPY').trim().toUpperCase();
       if (directive !== 'COPY' && directive !== 'REPLACE') {
         return reply.status(400).type('application/xml').send(
@@ -523,7 +605,7 @@ export async function s3Routes(fastify: FastifyInstance) {
       return reply.status(200).type('application/xml').send(
         `<?xml version="1.0" encoding="UTF-8"?>
 <CopyObjectResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
-  <ETag>${escapeXml(srcObj.etag)}</ETag>
+  <ETag>${srcObj.etag}</ETag>
   <LastModified>${new Date().toISOString()}</LastModified>
 </CopyObjectResult>`
       );

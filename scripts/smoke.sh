@@ -414,6 +414,23 @@ check "ListParts not truncated" "false" "$(printf '%s' "$LPXML" | sed -n 's:.*<I
 check "ListParts unknown upload -> 404" "404" "$(status_of -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" "$B/s3/smoke/big.bin?uploadId=nope")"
 check "ListMultipartUploads shows in-progress upload" "1" "$(curl -s -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" "$B/s3/smoke?uploads" | grep -c "$UPLOAD_ID")"
 
+# UploadPartCopy: a part sourced from an existing object (full or byte range).
+echo "== UploadPartCopy =="
+printf '0123456789abcdef' > "$TMP/copy-src.bin"
+check "seed copy source" "200" "$(status_of -X PUT -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" --data-binary @"$TMP/copy-src.bin" "$B/s3/smoke/copy-src.bin")"
+UPC_XML="$(curl -s -X POST -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" "$B/s3/smoke/copied.bin?uploads")"
+UPC_ID="$(printf '%s' "$UPC_XML" | sed -n 's:.*<UploadId>\([^<]*\)</UploadId>.*:\1:p')"
+check "UploadPartCopy full source" "200" "$(status_of -X PUT -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" -H "x-amz-copy-source: /smoke/copy-src.bin" "$B/s3/smoke/copied.bin?partNumber=1&uploadId=$UPC_ID")"
+UPC_ETAG1="$(curl -s -X PUT -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" -H "x-amz-copy-source: /smoke/copy-src.bin" "$B/s3/smoke/copied.bin?partNumber=1&uploadId=$UPC_ID" | sed -n 's:.*<ETag>\([^<]*\)</ETag>.*:\1:p')"
+[ -n "$UPC_ETAG1" ] || { echo "✗ no part ETag from UploadPartCopy"; exit 1; }
+check "UploadPartCopy range source" "200" "$(status_of -X PUT -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" -H "x-amz-copy-source: /smoke/copy-src.bin" -H "x-amz-copy-source-range: bytes=0-7" "$B/s3/smoke/copied.bin?partNumber=2&uploadId=$UPC_ID")"
+check "UploadPartCopy malformed range -> 400" "400" "$(status_of -X PUT -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" -H "x-amz-copy-source: /smoke/copy-src.bin" -H "x-amz-copy-source-range: bytes=abc" "$B/s3/smoke/copied.bin?partNumber=3&uploadId=$UPC_ID")"
+check "UploadPartCopy missing source -> 404" "404" "$(status_of -X PUT -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" -H "x-amz-copy-source: /smoke/does-not-exist.bin" "$B/s3/smoke/copied.bin?partNumber=3&uploadId=$UPC_ID")"
+UPC_ETAG2="$(curl -s -X PUT -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" -H "x-amz-copy-source: /smoke/copy-src.bin" -H "x-amz-copy-source-range: bytes=0-7" "$B/s3/smoke/copied.bin?partNumber=2&uploadId=$UPC_ID" | sed -n 's:.*<ETag>\([^<]*\)</ETag>.*:\1:p')"
+UPC_COMPLETE="<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>$UPC_ETAG1</ETag></Part><Part><PartNumber>2</PartNumber><ETag>$UPC_ETAG2</ETag></Part></CompleteMultipartUpload>"
+check "UploadPartCopy complete" "200" "$(status_of -X POST -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" -H "Content-Type: application/xml" --data "$UPC_COMPLETE" "$B/s3/smoke/copied.bin?uploadId=$UPC_ID")"
+check "UploadPartCopy assembled content" "0123456789abcdef01234567" "$(curl -s -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" "$B/s3/smoke/copied.bin")"
+
 COMPLETE_XML="<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>$ETAG1</ETag></Part><Part><PartNumber>2</PartNumber><ETag>$ETAG2</ETag></Part></CompleteMultipartUpload>"
 curl -s -o /dev/null -X POST -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" -H "Content-Type: application/xml" --data "$COMPLETE_XML" "$B/s3/smoke/big.bin?uploadId=$UPLOAD_ID"
 R=$(curl -s -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" "$B/s3/smoke/big.bin")
