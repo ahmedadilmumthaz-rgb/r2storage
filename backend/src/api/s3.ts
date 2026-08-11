@@ -269,27 +269,40 @@ export async function s3Routes(fastify: FastifyInstance) {
       }
     }
 
-    // ListObjectsV2
+    // ListObjectsV1 vs V2: `list-type=2` selects V2 (start-after /
+    // continuation-token pagination); its absence is the legacy V1 API, which
+    // paginates with `marker` and reports NextMarker. Older tools (s3cmd,
+    // rclone, aws-sdk-v2) default to V1, so both must answer correctly.
+    const isV2 = query['list-type'] === '2';
     const prefix = query['prefix'] || '';
     const delimiter = query['delimiter'] || '';
     let maxKeys = parseInt(query['max-keys'] || '1000', 10);
     if (!Number.isInteger(maxKeys) || maxKeys < 0) maxKeys = 1000;
     maxKeys = Math.min(maxKeys, 1000);
-    const startAfter = query['start-after'] || '';
-    // The continuation token is the base64url of the last raw key consumed by
-    // the previous page; the client replays it as continuation-token and we
-    // simply resume past that key. Tokens are opaque, so a malformed one is an
-    // InvalidArgument.
-    let resumeAfter = startAfter;
-    const ct = query['continuation-token'];
-    if (ct !== undefined && ct !== '') {
-      // Buffer.from(base64url) is lenient and never throws, so reject tokens
-      // that don't round-trip to their own canonical encoding.
-      const decoded = Buffer.from(ct, 'base64url').toString('utf8');
-      if (Buffer.from(decoded).toString('base64url') !== ct) {
-        return reply.status(400).type('application/xml').send(renderS3ErrorXml('InvalidArgument', 'The continuation token provided is incorrect'));
+    const encodingType = (query['encoding-type'] || '').toLowerCase() === 'url' ? 'url' : '';
+    let resumeAfter: string;
+    let startAfter = '';
+    let marker = '';
+    if (isV2) {
+      startAfter = query['start-after'] || '';
+      resumeAfter = startAfter;
+      // The continuation token is the base64url of the last raw key consumed by
+      // the previous page; the client replays it as continuation-token and we
+      // simply resume past that key. Tokens are opaque, so a malformed one is an
+      // InvalidArgument.
+      const ct = query['continuation-token'];
+      if (ct !== undefined && ct !== '') {
+        // Buffer.from(base64url) is lenient and never throws, so reject tokens
+        // that don't round-trip to their own canonical encoding.
+        const decoded = Buffer.from(ct, 'base64url').toString('utf8');
+        if (Buffer.from(decoded).toString('base64url') !== ct) {
+          return reply.status(400).type('application/xml').send(renderS3ErrorXml('InvalidArgument', 'The continuation token provided is incorrect'));
+        }
+        resumeAfter = decoded;
       }
-      resumeAfter = decoded;
+    } else {
+      marker = query['marker'] || '';
+      resumeAfter = marker;
     }
 
     const objects = await db.object.findMany({
@@ -329,14 +342,28 @@ export async function s3Routes(fastify: FastifyInstance) {
     }
     const token = truncated ? Buffer.from(lastConsumed).toString('base64url') : undefined;
 
-    const xml = renderListObjectsV2Xml(bucketName, {
+    if (isV2) {
+      const xml = renderListObjectsV2Xml(bucketName, {
+        prefix,
+        delimiter: delimiter || undefined,
+        startAfter: startAfter || undefined,
+        maxKeys,
+        isTruncated: truncated,
+        nextToken: token,
+        items,
+        encodingType: encodingType || undefined,
+      });
+      return reply.status(200).type('application/xml').send(xml);
+    }
+    const xml = renderListObjectsV1Xml(bucketName, {
       prefix,
       delimiter: delimiter || undefined,
-      startAfter: startAfter || undefined,
+      marker: marker || undefined,
       maxKeys,
       isTruncated: truncated,
-      nextToken: token,
+      nextMarker: truncated ? lastConsumed : undefined,
       items,
+      encodingType: encodingType || undefined,
     });
     return reply.status(200).type('application/xml').send(xml);
   });
@@ -1285,6 +1312,60 @@ export async function s3Routes(fastify: FastifyInstance) {
   });
 }
 
+// Shared listing body: Contents entries + CommonPrefixes. `enc` applies the
+// requested encoding (plain XML-escape, or URL-encode then escape for
+// encoding-type=url).
+function renderListItems(
+  items: Array<{ kind: 'content'; obj: any } | { kind: 'prefix'; prefix: string }>,
+  enc: (v: string) => string,
+): string {
+  const contents = items
+    .filter((i): i is { kind: 'content'; obj: any } => i.kind === 'content')
+    .map(
+      (i) => `
+    <Contents>
+      <Key>${enc(i.obj.key)}</Key>
+      <LastModified>${i.obj.updatedAt.toISOString()}</LastModified>
+      <ETag>${i.obj.etag}</ETag>
+      <Size>${i.obj.size}</Size>
+      <StorageClass>STANDARD</StorageClass>
+    </Contents>`
+    )
+    .join('');
+  const commonPrefixes = items
+    .filter((i): i is { kind: 'prefix'; prefix: string } => i.kind === 'prefix')
+    .map((i) => `  <CommonPrefixes>\n    <Prefix>${enc(i.prefix)}</Prefix>\n  </CommonPrefixes>`)
+    .join('\n');
+  return `${contents}${contents && commonPrefixes ? '\n' : ''}${commonPrefixes}`;
+}
+
+function renderListObjectsV1Xml(
+  bucketName: string,
+  opts: {
+    prefix: string;
+    delimiter?: string;
+    marker?: string;
+    maxKeys: number;
+    isTruncated: boolean;
+    nextMarker?: string;
+    items: Array<{ kind: 'content'; obj: any } | { kind: 'prefix'; prefix: string }>;
+    encodingType?: string;
+  }
+): string {
+  const enc = (v: string) => (opts.encodingType ? escapeXml(encodeURIComponent(v)) : escapeXml(v));
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <Name>${escapeXml(bucketName)}</Name>
+  <Prefix>${enc(opts.prefix)}</Prefix>
+  ${opts.marker ? `<Marker>${enc(opts.marker)}</Marker>` : ''}
+  ${opts.delimiter ? `<Delimiter>${enc(opts.delimiter)}</Delimiter>` : ''}
+  <MaxKeys>${opts.maxKeys}</MaxKeys>
+  <IsTruncated>${opts.isTruncated}</IsTruncated>
+  ${opts.encodingType ? `<EncodingType>${escapeXml(opts.encodingType)}</EncodingType>` : ''}
+  ${opts.isTruncated && opts.nextMarker !== undefined ? `<NextMarker>${enc(opts.nextMarker)}</NextMarker>` : ''}${renderListItems(opts.items, enc)}
+</ListBucketResult>`;
+}
+
 function renderListObjectsV2Xml(
   bucketName: string,
   opts: {
@@ -1295,36 +1376,21 @@ function renderListObjectsV2Xml(
     isTruncated: boolean;
     nextToken?: string;
     items: Array<{ kind: 'content'; obj: any } | { kind: 'prefix'; prefix: string }>;
+    encodingType?: string;
   }
 ): string {
-  const contents = opts.items
-    .filter((i): i is { kind: 'content'; obj: any } => i.kind === 'content')
-    .map(
-      (i) => `
-    <Contents>
-      <Key>${escapeXml(i.obj.key)}</Key>
-      <LastModified>${i.obj.updatedAt.toISOString()}</LastModified>
-      <ETag>${i.obj.etag}</ETag>
-      <Size>${i.obj.size}</Size>
-      <StorageClass>STANDARD</StorageClass>
-    </Contents>`
-    )
-    .join('');
-  const commonPrefixes = opts.items
-    .filter((i): i is { kind: 'prefix'; prefix: string } => i.kind === 'prefix')
-    .map((i) => `  <CommonPrefixes>\n    <Prefix>${escapeXml(i.prefix)}</Prefix>\n  </CommonPrefixes>`)
-    .join('\n');
-
+  const enc = (v: string) => (opts.encodingType ? escapeXml(encodeURIComponent(v)) : escapeXml(v));
   return `<?xml version="1.0" encoding="UTF-8"?>
 <ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
   <Name>${escapeXml(bucketName)}</Name>
-  <Prefix>${escapeXml(opts.prefix)}</Prefix>
-  ${opts.delimiter ? `<Delimiter>${escapeXml(opts.delimiter)}</Delimiter>` : ''}
-  ${opts.startAfter ? `<StartAfter>${escapeXml(opts.startAfter)}</StartAfter>` : ''}
+  <Prefix>${enc(opts.prefix)}</Prefix>
+  ${opts.delimiter ? `<Delimiter>${enc(opts.delimiter)}</Delimiter>` : ''}
+  ${opts.startAfter ? `<StartAfter>${enc(opts.startAfter)}</StartAfter>` : ''}
   <KeyCount>${opts.items.length}</KeyCount>
   <MaxKeys>${opts.maxKeys}</MaxKeys>
   <IsTruncated>${opts.isTruncated}</IsTruncated>
-  ${opts.nextToken ? `<NextContinuationToken>${escapeXml(opts.nextToken)}</NextContinuationToken>` : ''}${contents}${contents && commonPrefixes ? '\n' : ''}${commonPrefixes}
+  ${opts.encodingType ? `<EncodingType>${escapeXml(opts.encodingType)}</EncodingType>` : ''}
+  ${opts.nextToken ? `<NextContinuationToken>${escapeXml(opts.nextToken)}</NextContinuationToken>` : ''}${renderListItems(opts.items, enc)}
 </ListBucketResult>`;
 }
 

@@ -82,7 +82,7 @@ GET|PUT|HEAD|POST|DELETE  /s3/<bucket>[/<key>][?query]
 
 | Operation | Method + path | Auth | Notes |
 | --- | --- | --- | --- |
-| ListObjectsV2 | `GET /s3/<bucket>?prefix=<p>` | public buckets: none; private: read | XML `<ListBucketResult>`; up to 1000 keys |
+| ListObjectsV1 + V2 | `GET /s3/<bucket>?prefix=<p>` (V1: `marker=`; V2: `list-type=2&continuation-token=`/`start-after=`) | public buckets: none; private: read | XML `<ListBucketResult>`; up to 1000 keys; `delimiter=` folds into `<CommonPrefixes>`; `encoding-type=url` URL-encodes keys; both dialects paginate (V1 `NextMarker`, V2 `NextContinuationToken`) |
 | PutObject | `PUT /s3/<bucket>/<key>` | write | body is streamed to disk; returns `ETag` header; supports conditional writes (below) |
 | GetObject | `GET /s3/<bucket>/<key>` | public: none; private: read | streams body; sets `Content-Type`, `ETag`, `Content-Length`; supports **byte-range + conditional GET** (below) |
 | HeadObject | `HEAD /s3/<bucket>/<key>` | public: none; private: read | headers only, no body |
@@ -482,8 +482,7 @@ curl -s -X POST "$API/buckets/assets/presigned" -H "X-Admin-Secret: $SECRET" \
 ## 8. Limits & behavior notes
 
 - **Max body**: 10 GB per request (streamed to disk, not buffered in RAM).
-- **ListObjectsV2**: returns up to 1000 keys, `IsTruncated=false` (no pagination yet).
-- **GET** does not yet honor `Range` headers (always streams the full object).
+- **ListObjects V1 + V2**: up to 1000 keys per page; V2 paginates with `continuation-token` (opaque base64url), V1 with `marker`/`NextMarker`; `encoding-type=url` is honored on both.
 - **DeleteObject requires `FULL`** permission (read-only and write-only keys can't delete).
 - **Multipart minimum part**: 1 part or more; parts are validated by number + ETag at completion.
 - **Signing details**: region `us-east-1`, service `s3`, payload hash `UNSIGNED-PAYLOAD` is accepted; the `host` header must be signed (SDKs/CLI handle this).
