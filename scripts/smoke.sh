@@ -389,9 +389,30 @@ check "PUT with wrong Content-MD5 -> 400" "400" "$(status_of -X PUT "${AUTH_OPTS
 check "rejected Content-MD5 object not stored" "404" "$(status_of "${AUTH_OPTS[@]}" "$B/s3/smoke/md5bad.txt")"
 check "PUT with malformed Content-MD5 -> 400" "400" "$(status_of -X PUT "${AUTH_OPTS[@]}" -H 'Content-MD5: not-base64!!' --data-binary 'md5-check' "$B/s3/smoke/md5bad2.txt")"
 
+# --- object tags -----------------------------------------------------------------
+echo "== object tags =="
+printf 'tagged' > "$TMP/tagged.txt"
+check "PUT with x-amz-tagging" "200" "$(status_of -X PUT "${AUTH_OPTS[@]}" -H 'x-amz-tagging: color=red&env=prod' --data-binary @"$TMP/tagged.txt" "$B/s3/smoke/tagged.txt")"
+check "GET reports x-amz-tagging-count" "2" "$(curl -s -D - -o /dev/null "${AUTH_OPTS[@]}" "$B/s3/smoke/tagged.txt" | grep -i '^x-amz-tagging-count:' | tr -d '\r' | cut -d' ' -f2-)"
+check "GET ?tagging lists tags" "1" "$(curl -s "${AUTH_OPTS[@]}" "$B/s3/smoke/tagged.txt?tagging" | grep -c '<Key>color</Key><Value>red</Value>')"
+TAGBODY='<Tagging><TagSet><Tag><Key>newtag</Key><Value>yes</Value></Tag></TagSet></Tagging>'
+TAGMD5="$(printf '%s' "$TAGBODY" | openssl dgst -md5 -binary | base64)"
+check "PUT ?tagging replaces tags" "200" "$(status_of -X PUT "${AUTH_OPTS[@]}" -H "Content-MD5: $TAGMD5" --data "$TAGBODY" "$B/s3/smoke/tagged.txt?tagging")"
+check "replaced tags visible" "1" "$(curl -s "${AUTH_OPTS[@]}" "$B/s3/smoke/tagged.txt?tagging" | grep -c '<Key>newtag</Key><Value>yes</Value>')"
+check "old tag gone" "0" "$(curl -s "${AUTH_OPTS[@]}" "$B/s3/smoke/tagged.txt?tagging" | grep -c '<Key>color</Key>')"
+check "PUT ?tagging wrong Content-MD5 -> 400" "400" "$(status_of -X PUT "${AUTH_OPTS[@]}" -H 'Content-MD5: QUJDRA==' --data "$TAGBODY" "$B/s3/smoke/tagged.txt?tagging")"
+check "PUT ?tagging malformed XML -> 400" "400" "$(status_of -X PUT "${AUTH_OPTS[@]}" --data '<Tagging><TagSet><Tag><Key>x</Key>' "$B/s3/smoke/tagged.txt?tagging")"
+check "PUT ?tagging missing object -> 404" "404" "$(status_of -X PUT "${AUTH_OPTS[@]}" --data "$TAGBODY" "$B/s3/smoke/nope.txt?tagging")"
+check "GET ?tagging missing object -> 404" "404" "$(status_of "${AUTH_OPTS[@]}" "$B/s3/smoke/nope.txt?tagging")"
+check "DELETE ?tagging clears tags" "204" "$(status_of -X DELETE "${AUTH_OPTS[@]}" "$B/s3/smoke/tagged.txt?tagging")"
+check "cleared tags drop tagging-count header" "0" "$(curl -s -D - -o /dev/null "${AUTH_OPTS[@]}" "$B/s3/smoke/tagged.txt" | grep -ci '^x-amz-tagging-count:')"
+check "PUT with duplicate x-amz-tagging -> 400" "400" "$(status_of -X PUT "${AUTH_OPTS[@]}" -H 'x-amz-tagging: color=red&color=blue' --data-binary x "$B/s3/smoke/tagbad.txt")"
+check "CopyObject COPY inherits tags" "1" "$(curl -s -o /dev/null -X PUT "${AUTH_OPTS[@]}" -H 'x-amz-tagging: color=red' --data-binary x "$B/s3/smoke/tagged2.txt"; curl -s -o /dev/null -X PUT "${AUTH_OPTS[@]}" -H 'x-amz-copy-source: /smoke/tagged2.txt' "$B/s3/smoke/tag-copy.txt"; curl -s "${AUTH_OPTS[@]}" "$B/s3/smoke/tag-copy.txt?tagging" | grep -c '<Key>color</Key><Value>red</Value>')"
+check "CopyObject REPLACE swaps tags" "1" "$(curl -s -o /dev/null -X PUT "${AUTH_OPTS[@]}" -H 'x-amz-copy-source: /smoke/tagged2.txt' -H 'x-amz-tagging-directive: REPLACE' -H 'x-amz-tagging: new=yes' "$B/s3/smoke/tag-replaced.txt"; curl -s "${AUTH_OPTS[@]}" "$B/s3/smoke/tag-replaced.txt?tagging" | grep -c '<Key>new</Key><Value>yes</Value>')"
+
 # --- multipart ------------------------------------------------------------------
 echo "== multipart upload =="
-R=$(curl -s -X POST -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" "$B/s3/smoke/big.bin?uploads")
+R=$(curl -s -X POST -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" -H 'x-amz-tagging: mp=1' "$B/s3/smoke/big.bin?uploads")
 UPLOAD_ID="$(printf '%s' "$R" | sed -n 's:.*<UploadId>\([^<]*\)</UploadId>.*:\1:p')"
 check "create multipart upload" "200" "$(curl -s -o /dev/null -w "%{http_code}" -X POST -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" "$B/s3/smoke/big.bin?uploads")"
 [ -n "$UPLOAD_ID" ] || { echo "✗ no UploadId in XML"; exit 1; }
@@ -435,6 +456,7 @@ COMPLETE_XML="<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>$ET
 curl -s -o /dev/null -X POST -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" -H "Content-Type: application/xml" --data "$COMPLETE_XML" "$B/s3/smoke/big.bin?uploadId=$UPLOAD_ID"
 R=$(curl -s -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" "$B/s3/smoke/big.bin")
 check "multipart assembled" "part-onepart-two" "$R"
+check "multipart object carries initiate-time tags" "1" "$(curl -s -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" "$B/s3/smoke/big.bin?tagging" | grep -c '<Key>mp</Key><Value>1</Value>')"
 # The assembled object must also be encrypted on disk (multipart parts decrypt
 # and re-encrypt during assembly). Check the magic of every stored blob.
 ALLENC="$(find "$STORE/smoke" -type f | while read -r f; do head -c 6 "$f" | xxd -p; done | sort -u)"

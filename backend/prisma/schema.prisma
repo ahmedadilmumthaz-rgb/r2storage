@@ -26,6 +26,7 @@ model Object {
   etag        String
   storagePath String
   metadata    String?  // JSON stringified custom metadata
+  tags        String?  // JSON stringified object tags (x-amz-tagging)
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
@@ -117,6 +118,7 @@ model MultipartUpload {
   uploadId    String   @unique
   contentType String   @default("application/octet-stream")
   metadata    String?  // JSON stringified custom metadata (set at initiate)
+  tags        String?  // JSON stringified object tags (set at initiate)
   parts       MultipartPart[]
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt

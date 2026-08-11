@@ -8,6 +8,14 @@ import crypto from 'crypto';
 import { Readable } from 'stream';
 import { parseRangeHeader, notModified, readPreconditionFailed, checkWritePreconditions } from './range';
 import { extractMetadataFromHeaders, serializeMetadata, metadataHeaders } from './metadata';
+import {
+  parseTaggingHeader,
+  parseTaggingXml,
+  serializeTags,
+  deserializeTags,
+  tagCount,
+  renderTaggingXml,
+} from './tags';
 
 function bodyAsStream(body: unknown): NodeJS.ReadableStream {
   if (body && typeof (body as any).pipe === 'function') {
@@ -258,6 +266,16 @@ export async function s3Routes(fastify: FastifyInstance) {
       }
     }
 
+    // GetObjectTagging (?tagging): returns the stored tag set as XML (empty
+    // TagSet when none) and 404 when the object is missing.
+    if (query['tagging'] !== undefined) {
+      const tagObj = await db.object.findUnique({ where: { bucketName_key: { bucketName, key } } });
+      if (!tagObj) {
+        return reply.status(404).type('application/xml').send(renderS3ErrorXml('NoSuchKey', 'The specified key does not exist.'));
+      }
+      return reply.status(200).type('application/xml').send(renderTaggingXml(deserializeTags(tagObj.tags)));
+    }
+
     // ListParts: SDKs inspect an in-progress upload's parts before completing.
     if (query['uploadId'] !== undefined) {
       const upload = await db.multipartUpload.findUnique({ where: { uploadId: query['uploadId'] } });
@@ -325,6 +343,9 @@ export async function s3Routes(fastify: FastifyInstance) {
       reply.header('Cache-Control', 'public, max-age=31536000');
     }
     reply.header('Accept-Ranges', 'bytes');
+    // S3 reports the number of tags on a GetObject response.
+    const count = tagCount(obj.tags);
+    if (count > 0) reply.header('x-amz-tagging-count', String(count));
 
     // Presigned-URL response overrides (response-content-type etc.): clients
     // bake these into the query string of a presigned GET.
@@ -411,6 +432,49 @@ export async function s3Routes(fastify: FastifyInstance) {
     const denied = permissionDenied(auth, bucketName, 'write');
     if (denied) {
       return reply.status(403).type('application/xml').send(renderS3ErrorXml('AccessDenied', denied));
+    }
+
+    // PutObjectTagging (?tagging): replace the object's tag set from an XML
+    // body. Content-MD5 is verified against the body when supplied (AWS makes
+    // it mandatory here; we accept its absence but never skip a provided one).
+    if (query['tagging'] !== undefined) {
+      const tagObj = await db.object.findUnique({ where: { bucketName_key: { bucketName, key } } });
+      if (!tagObj) {
+        return reply.status(404).type('application/xml').send(renderS3ErrorXml('NoSuchKey', 'The specified key does not exist.'));
+      }
+      let body: string;
+      try {
+        body = await streamToString(bodyAsStream(req.body), MAX_COMPLETE_XML_BYTES);
+      } catch {
+        return reply.status(413).type('application/xml').send(
+          renderS3ErrorXml('EntityTooLarge', 'The PutObjectTagging body exceeds the 1MB limit.')
+        );
+      }
+      const md5Header = (req.headers['content-md5'] as string | undefined)?.trim();
+      if (md5Header) {
+        const supplied = Buffer.from(md5Header, 'base64');
+        const computed = crypto.createHash('md5').update(body, 'utf8').digest();
+        if (
+          supplied.length === 0 ||
+          supplied.toString('base64') !== md5Header ||
+          supplied.length !== computed.length ||
+          !crypto.timingSafeEqual(supplied, computed)
+        ) {
+          return reply.status(400).type('application/xml').send(
+            renderS3ErrorXml('BadDigest', 'The Content-MD5 you specified did not match what we received.')
+          );
+        }
+      }
+      const tags = parseTaggingXml(body);
+      if (!tags) {
+        return reply.status(400).type('application/xml').send(
+          renderS3ErrorXml('InvalidTag', 'The tag provided was not valid, or the tag set contained duplicate or too many tags.')
+        );
+      }
+      await db.object.update({ where: { id: tagObj.id }, data: { tags: serializeTags(tags) } });
+      return reply.status(200).type('application/xml').send(
+        `<?xml version="1.0" encoding="UTF-8"?><Tagging xmlns="http://s3.amazonaws.com/doc/2006-03-01/"/>`
+      );
     }
 
     // 3a. CopyObject — PUT with an x-amz-copy-source header clones the source
@@ -577,6 +641,25 @@ export async function s3Routes(fastify: FastifyInstance) {
         directive === 'REPLACE'
           ? serializeMetadata(extractMetadataFromHeaders(req.headers as Record<string, unknown>))
           : srcObj.metadata;
+      // Tags follow the same COPY/REPLACE semantics via x-amz-tagging-directive.
+      const tagDirective = (req.headers['x-amz-tagging-directive'] as string || 'COPY').trim().toUpperCase();
+      let destTags: string | null;
+      if (tagDirective === 'REPLACE') {
+        const header = req.headers['x-amz-tagging'] as string | undefined;
+        if (header !== undefined) {
+          const parsed = parseTaggingHeader(header);
+          if (!parsed) {
+            return reply.status(400).type('application/xml').send(
+              renderS3ErrorXml('InvalidTag', 'The tag provided was not valid, or the tag set contained duplicate or too many tags.')
+            );
+          }
+          destTags = serializeTags(parsed);
+        } else {
+          destTags = null;
+        }
+      } else {
+        destTags = srcObj.tags;
+      }
       const storagePath = await storageEngine.copyObjectFile(srcObj.storagePath, bucketName, key);
 
       await db.object.upsert({
@@ -589,6 +672,7 @@ export async function s3Routes(fastify: FastifyInstance) {
           etag: srcObj.etag,
           storagePath,
           metadata: destMetadata,
+          tags: destTags,
         },
         update: {
           size: srcObj.size,
@@ -596,6 +680,7 @@ export async function s3Routes(fastify: FastifyInstance) {
           etag: srcObj.etag,
           storagePath,
           metadata: destMetadata,
+          tags: destTags,
           updatedAt: new Date(),
         },
       });
@@ -696,6 +781,20 @@ export async function s3Routes(fastify: FastifyInstance) {
       return reply.status(400).type('application/xml').send(md5Error);
     }
 
+    // x-amz-tagging stores tags alongside the object on PUT.
+    const tagHeader = req.headers['x-amz-tagging'] as string | undefined;
+    let storedTags: string | null = null;
+    if (tagHeader !== undefined) {
+      const parsed = parseTaggingHeader(tagHeader);
+      if (!parsed) {
+        await storageEngine.deleteObjectFile(storagePath);
+        return reply.status(400).type('application/xml').send(
+          renderS3ErrorXml('InvalidTag', 'The tag provided was not valid, or the tag set contained duplicate or too many tags.')
+        );
+      }
+      storedTags = serializeTags(parsed);
+    }
+
     // Authoritative post-write check (also covers requests without Content-Length).
     if (await wouldExceedQuota(size, existing?.size || 0)) {
       await storageEngine.deleteObjectFile(storagePath);
@@ -714,6 +813,7 @@ export async function s3Routes(fastify: FastifyInstance) {
         etag,
         storagePath,
         metadata: serializeMetadata(extractMetadataFromHeaders(req.headers as Record<string, unknown>)),
+        tags: storedTags,
       },
       update: {
         size,
@@ -721,6 +821,7 @@ export async function s3Routes(fastify: FastifyInstance) {
         etag,
         storagePath,
         metadata: serializeMetadata(extractMetadataFromHeaders(req.headers as Record<string, unknown>)),
+        tags: storedTags,
         updatedAt: new Date(),
       },
     });
@@ -754,6 +855,20 @@ export async function s3Routes(fastify: FastifyInstance) {
       }
       await db.multipartUpload.delete({ where: { uploadId } });
       await storageEngine.deleteUploadParts(uploadId);
+      return reply.status(204).send();
+    }
+
+    // DeleteObjectTagging (?tagging): clears the tag set, keeping the object.
+    if (query['tagging'] !== undefined) {
+      const denied = permissionDenied(auth, bucketName, 'full');
+      if (denied) {
+        return reply.status(403).type('application/xml').send(renderS3ErrorXml('AccessDenied', denied));
+      }
+      const tagObj = await db.object.findUnique({ where: { bucketName_key: { bucketName, key } } });
+      if (!tagObj) {
+        return reply.status(404).type('application/xml').send(renderS3ErrorXml('NoSuchKey', 'The specified key does not exist.'));
+      }
+      await db.object.update({ where: { id: tagObj.id }, data: { tags: null } });
       return reply.status(204).send();
     }
 
@@ -803,6 +918,13 @@ export async function s3Routes(fastify: FastifyInstance) {
     if (query['uploads'] !== undefined) {
       const uploadId = crypto.randomUUID();
       const contentType = (req.headers['content-type'] as string) || mime.lookup(key) || 'application/octet-stream';
+      const tagHeader = req.headers['x-amz-tagging'] as string | undefined;
+      const tags = tagHeader !== undefined ? parseTaggingHeader(tagHeader) : undefined;
+      if (tagHeader !== undefined && !tags) {
+        return reply.status(400).type('application/xml').send(
+          renderS3ErrorXml('InvalidTag', 'The tag provided was not valid, or the tag set contained duplicate or too many tags.')
+        );
+      }
       await db.multipartUpload.create({
         data: {
           bucketName,
@@ -810,6 +932,7 @@ export async function s3Routes(fastify: FastifyInstance) {
           uploadId,
           contentType,
           metadata: serializeMetadata(extractMetadataFromHeaders(req.headers as Record<string, unknown>)),
+          tags: tags ? serializeTags(tags) : null,
         },
       });
       return reply.status(200).type('application/xml').send(renderMultipartInitXml(bucketName, key, uploadId));
@@ -896,6 +1019,7 @@ export async function s3Routes(fastify: FastifyInstance) {
         etag,
         storagePath,
         metadata: upload.metadata,
+        tags: upload.tags,
       },
       update: {
         size,
@@ -903,6 +1027,7 @@ export async function s3Routes(fastify: FastifyInstance) {
         etag,
         storagePath,
         metadata: upload.metadata,
+        tags: upload.tags,
         updatedAt: new Date(),
       },
     });
