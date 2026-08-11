@@ -7,6 +7,7 @@ import mime from 'mime-types';
 import crypto from 'crypto';
 import { Readable } from 'stream';
 import { parseRangeHeader, notModified, checkWritePreconditions } from './range';
+import { extractMetadataFromHeaders, serializeMetadata, metadataHeaders } from './metadata';
 
 function bodyAsStream(body: unknown): NodeJS.ReadableStream {
   if (body && typeof (body as any).pipe === 'function') {
@@ -120,7 +121,15 @@ export async function s3Routes(fastify: FastifyInstance) {
     reply.header('Access-Control-Allow-Origin', bucket.corsOrigins || '*');
     reply.header('Content-Type', obj.contentType);
     reply.header('ETag', obj.etag);
-    reply.header('Cache-Control', 'public, max-age=31536000');
+    // Object metadata (x-amz-meta-*, Content-Disposition/Encoding/Cache-Control)
+    // comes back verbatim; the default cache-control applies only when the
+    // object doesn't carry its own.
+    for (const [h, v] of Object.entries(metadataHeaders(obj.metadata))) {
+      reply.header(h, v);
+    }
+    if (!reply.hasHeader('cache-control')) {
+      reply.header('Cache-Control', 'public, max-age=31536000');
+    }
     reply.header('Accept-Ranges', 'bytes');
 
     // Conditional GET: honor If-None-Match / If-Modified-Since (RFC 7232).
@@ -272,6 +281,12 @@ export async function s3Routes(fastify: FastifyInstance) {
         directive === 'REPLACE'
           ? (req.headers['content-type'] as string) || srcObj.contentType
           : srcObj.contentType;
+      // COPY inherits the source's metadata blob; REPLACE re-derives it from
+      // the request's headers (making the directive meaningful beyond Content-Type).
+      const destMetadata =
+        directive === 'REPLACE'
+          ? serializeMetadata(extractMetadataFromHeaders(req.headers as Record<string, unknown>))
+          : srcObj.metadata;
       const storagePath = await storageEngine.copyObjectFile(srcObj.storagePath, bucketName, key);
 
       await db.object.upsert({
@@ -283,12 +298,14 @@ export async function s3Routes(fastify: FastifyInstance) {
           contentType: destContentType,
           etag: srcObj.etag,
           storagePath,
+          metadata: destMetadata,
         },
         update: {
           size: srcObj.size,
           contentType: destContentType,
           etag: srcObj.etag,
           storagePath,
+          metadata: destMetadata,
           updatedAt: new Date(),
         },
       });
@@ -390,12 +407,14 @@ export async function s3Routes(fastify: FastifyInstance) {
         contentType,
         etag,
         storagePath,
+        metadata: serializeMetadata(extractMetadataFromHeaders(req.headers as Record<string, unknown>)),
       },
       update: {
         size,
         contentType,
         etag,
         storagePath,
+        metadata: serializeMetadata(extractMetadataFromHeaders(req.headers as Record<string, unknown>)),
         updatedAt: new Date(),
       },
     });
@@ -479,7 +498,13 @@ export async function s3Routes(fastify: FastifyInstance) {
       const uploadId = crypto.randomUUID();
       const contentType = (req.headers['content-type'] as string) || mime.lookup(key) || 'application/octet-stream';
       await db.multipartUpload.create({
-        data: { bucketName, key, uploadId, contentType },
+        data: {
+          bucketName,
+          key,
+          uploadId,
+          contentType,
+          metadata: serializeMetadata(extractMetadataFromHeaders(req.headers as Record<string, unknown>)),
+        },
       });
       return reply.status(200).type('application/xml').send(renderMultipartInitXml(bucketName, key, uploadId));
     }
@@ -564,12 +589,14 @@ export async function s3Routes(fastify: FastifyInstance) {
         contentType: upload.contentType,
         etag,
         storagePath,
+        metadata: upload.metadata,
       },
       update: {
         size,
         contentType: upload.contentType,
         etag,
         storagePath,
+        metadata: upload.metadata,
         updatedAt: new Date(),
       },
     });

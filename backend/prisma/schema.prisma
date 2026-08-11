@@ -116,6 +116,7 @@ model MultipartUpload {
   key         String
   uploadId    String   @unique
   contentType String   @default("application/octet-stream")
+  metadata    String?  // JSON stringified custom metadata (set at initiate)
   parts       MultipartPart[]
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt

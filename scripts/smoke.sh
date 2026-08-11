@@ -326,6 +326,29 @@ ROSK="$(json_field "$ROKEY" secretAccessKey)"
 check "DeleteObjects with READ_ONLY key -> 403" "403" "$(status_of -X POST -H "x-access-key-id: $ROAK" -H "x-access-key-secret: $ROSK" -H "Content-Type: application/xml" --data "$DEL_XML" "$B/s3/smoke?delete")"
 check "bucket-level POST without ?delete -> 400" "400" "$(status_of -X POST "${AUTH_OPTS[@]}" -H "Content-Type: application/xml" --data '<Delete></Delete>' "$B/s3/smoke")"
 
+# --- object metadata ---------------------------------------------------------------
+echo "== object metadata =="
+META_OPTS=( -H "x-amz-meta-color: red" -H "x-amz-meta-owner: alice" -H 'Content-Disposition: attachment; filename="report.txt"' -H "Content-Encoding: gzip" -H "Cache-Control: max-age=60" )
+printf 'meta-data' > "$TMP/meta.txt"
+check "PUT with metadata" "200" "$(status_of -X PUT "${AUTH_OPTS[@]}" "${META_OPTS[@]}" --data-binary @"$TMP/meta.txt" "$B/s3/smoke/meta.txt")"
+check "GET returns x-amz-meta-color" "red" "$(curl -s -D - -o /dev/null "${AUTH_OPTS[@]}" "$B/s3/smoke/meta.txt" | grep -i '^x-amz-meta-color:' | tr -d '\r' | cut -d' ' -f2-)"
+check "GET returns x-amz-meta-owner" "alice" "$(curl -s -D - -o /dev/null "${AUTH_OPTS[@]}" "$B/s3/smoke/meta.txt" | grep -i '^x-amz-meta-owner:' | tr -d '\r' | cut -d' ' -f2-)"
+check "GET returns Content-Disposition" 'attachment; filename="report.txt"' "$(curl -s -D - -o /dev/null "${AUTH_OPTS[@]}" "$B/s3/smoke/meta.txt" | grep -i '^content-disposition:' | tr -d '\r' | cut -d' ' -f2-)"
+check "GET returns Content-Encoding" "gzip" "$(curl -s -D - -o /dev/null "${AUTH_OPTS[@]}" "$B/s3/smoke/meta.txt" | grep -i '^content-encoding:' | tr -d '\r' | cut -d' ' -f2-)"
+check "stored Cache-Control overrides default" "max-age=60" "$(curl -s -D - -o /dev/null "${AUTH_OPTS[@]}" "$B/s3/smoke/meta.txt" | grep -i '^cache-control:' | tr -d '\r' | cut -d' ' -f2-)"
+check "default Cache-Control without metadata" "public, max-age=31536000" "$(curl -s -D - -o /dev/null "${AUTH_OPTS[@]}" "$B/s3/smoke/hello.txt" | grep -i '^cache-control:' | tr -d '\r' | cut -d' ' -f2-)"
+check "HEAD returns metadata too" "red" "$(curl -s -I "${AUTH_OPTS[@]}" "$B/s3/smoke/meta.txt" | grep -i '^x-amz-meta-color:' | tr -d '\r' | cut -d' ' -f2-)"
+# CopyObject COPY inherits the source's metadata; REPLACE re-derives it.
+check "COPY directive inherits metadata" "red" "$(curl -s -o /dev/null -X PUT "${AUTH_OPTS[@]}" -H "x-amz-copy-source: /smoke/meta.txt" "$B/s3/smoke/meta-copy.txt"; curl -s -D - -o /dev/null "${AUTH_OPTS[@]}" "$B/s3/smoke/meta-copy.txt" | grep -i '^x-amz-meta-color:' | tr -d '\r' | cut -d' ' -f2-)"
+check "REPLACE directive swaps metadata" "blue" "$(curl -s -o /dev/null -X PUT "${AUTH_OPTS[@]}" -H "x-amz-copy-source: /smoke/meta.txt" -H "x-amz-metadata-directive: REPLACE" -H "x-amz-meta-color: blue" "$B/s3/smoke/meta-replaced.txt"; curl -s -D - -o /dev/null "${AUTH_OPTS[@]}" "$B/s3/smoke/meta-replaced.txt" | grep -i '^x-amz-meta-color:' | tr -d '\r' | cut -d' ' -f2-)"
+check "REPLACE drops inherited metadata" "0" "$(curl -s -D - -o /dev/null "${AUTH_OPTS[@]}" "$B/s3/smoke/meta-replaced.txt" | grep -ci '^x-amz-meta-owner:')"
+# Multipart: metadata is captured at initiate and lands on the completed object.
+METAUP_XML="$(curl -s -X POST "${AUTH_OPTS[@]}" -H "x-amz-meta-shard: 1" "$B/s3/smoke/meta-mp.bin?uploads")"
+METAUP_ID="$(printf '%s' "$METAUP_XML" | sed -n 's:.*<UploadId>\([^<]*\)</UploadId>.*:\1:p')"
+MPE="$(curl -s -D - -o /dev/null -X PUT "${AUTH_OPTS[@]}" --data-binary 'part1' "$B/s3/smoke/meta-mp.bin?partNumber=1&uploadId=$METAUP_ID" | grep -i '^etag:' | tr -d '\r' | cut -d' ' -f2)"
+curl -s -o /dev/null -X POST "${AUTH_OPTS[@]}" -H "Content-Type: application/xml" --data "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>$MPE</ETag></Part></CompleteMultipartUpload>" "$B/s3/smoke/meta-mp.bin?uploadId=$METAUP_ID"
+check "multipart object carries initiate-time metadata" "1" "$(curl -s -D - -o /dev/null "${AUTH_OPTS[@]}" "$B/s3/smoke/meta-mp.bin" | grep -ci '^x-amz-meta-shard: 1')"
+
 # --- multipart ------------------------------------------------------------------
 echo "== multipart upload =="
 R=$(curl -s -X POST -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" "$B/s3/smoke/big.bin?uploads")

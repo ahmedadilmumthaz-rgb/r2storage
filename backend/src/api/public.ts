@@ -3,6 +3,7 @@ import { db } from '../db';
 import { storageEngine } from '../storage/engine';
 import { CONFIG } from '../config';
 import { parseRangeHeader, notModified } from './range';
+import { metadataHeaders } from './metadata';
 
 /**
  * Resolves a request for a public custom-domain URL and streams the object.
@@ -74,7 +75,14 @@ export async function tryServePublicObject(
   reply.header('Access-Control-Allow-Origin', bucket.corsOrigins || '*');
   reply.header('Content-Type', obj.contentType);
   reply.header('ETag', obj.etag);
-  reply.header('Cache-Control', 'public, max-age=31536000');
+  // Object metadata comes back verbatim; the default cache-control applies only
+  // when the object doesn't carry its own.
+  for (const [h, v] of Object.entries(metadataHeaders(obj.metadata))) {
+    reply.header(h, v);
+  }
+  if (!reply.hasHeader('cache-control')) {
+    reply.header('Cache-Control', 'public, max-age=31536000');
+  }
   reply.header('Accept-Ranges', 'bytes');
 
   // Conditional GET + byte ranges behave like the S3 route (206/416/304);
