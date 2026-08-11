@@ -2,6 +2,7 @@ import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { db } from '../db';
 import { storageEngine } from '../storage/engine';
 import { CONFIG } from '../config';
+import { parseRangeHeader, notModified } from './range';
 
 /**
  * Resolves a request for a public custom-domain URL and streams the object.
@@ -72,11 +73,46 @@ export async function tryServePublicObject(
 
   reply.header('Access-Control-Allow-Origin', bucket.corsOrigins || '*');
   reply.header('Content-Type', obj.contentType);
-  reply.header('Content-Length', obj.size);
   reply.header('ETag', obj.etag);
   reply.header('Cache-Control', 'public, max-age=31536000');
+  reply.header('Accept-Ranges', 'bytes');
 
-  await reply.send(stream);
+  // Conditional GET + byte ranges behave like the S3 route (206/416/304);
+  // useful for media streams served from a custom domain.
+  if (notModified(req.headers as Record<string, unknown>, obj.etag, obj.updatedAt)) {
+    await reply.status(304).send();
+    return true;
+  }
+
+  const spec = parseRangeHeader(req.headers.range as string | undefined, obj.size);
+  if (spec.kind === 'invalid') {
+    reply.header('Content-Range', `bytes */${obj.size}`);
+    await reply.status(416).send({ error: 'Range Not Satisfiable' });
+    return true;
+  }
+
+  let status = 200;
+  let contentLength = obj.size;
+  let rangeHeader: string | undefined;
+  let body: NodeJS.ReadableStream;
+  if (spec.kind === 'partial') {
+    status = 206;
+    contentLength = spec.length!;
+    rangeHeader = `bytes ${spec.start}-${spec.end}/${obj.size}`;
+    const ranged = await storageEngine.getObjectStreamRange(obj.storagePath, spec.start!, spec.end!);
+    if (!ranged) {
+      await reply.status(404).send({ error: 'Object storage file missing.' });
+      return true;
+    }
+    body = ranged;
+  } else {
+    body = stream;
+  }
+
+  reply.header('Content-Length', contentLength);
+  if (rangeHeader) reply.header('Content-Range', rangeHeader);
+
+  await reply.status(status).send(body);
   return true;
 }
 

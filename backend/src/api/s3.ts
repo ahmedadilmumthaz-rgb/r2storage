@@ -6,6 +6,7 @@ import { wouldExceedQuota } from '../quota';
 import mime from 'mime-types';
 import crypto from 'crypto';
 import { Readable } from 'stream';
+import { parseRangeHeader, notModified } from './range';
 
 function bodyAsStream(body: unknown): NodeJS.ReadableStream {
   if (body && typeof (body as any).pipe === 'function') {
@@ -115,17 +116,45 @@ export async function s3Routes(fastify: FastifyInstance) {
       return reply.status(404).type('application/xml').send(renderS3ErrorXml('NoSuchKey', 'The specified key does not exist.'));
     }
 
-    const stream = await storageEngine.getObjectStream(obj.storagePath);
+    // Set CORS headers
+    reply.header('Access-Control-Allow-Origin', bucket.corsOrigins || '*');
+    reply.header('Content-Type', obj.contentType);
+    reply.header('ETag', obj.etag);
+    reply.header('Cache-Control', 'public, max-age=31536000');
+    reply.header('Accept-Ranges', 'bytes');
+
+    // Conditional GET: honor If-None-Match / If-Modified-Since (RFC 7232).
+    if (notModified(req.headers as Record<string, unknown>, obj.etag, obj.updatedAt)) {
+      return reply.status(304).send();
+    }
+
+    // Byte-range GET: single `bytes=` range → 206, unsatisfiable → 416,
+    // anything else (malformed, multi-range) serves the full object as 200.
+    let status = 200;
+    let contentLength = obj.size;
+    let rangeHeader: string | undefined;
+    const range = req.headers.range as string | undefined;
+    const spec = parseRangeHeader(range, obj.size);
+    if (spec.kind === 'invalid') {
+      reply.header('Content-Range', `bytes */${obj.size}`);
+      return reply.status(416).type('application/xml').send(renderS3ErrorXml('InvalidRange', 'The requested range is not satisfiable'));
+    }
+
+    let stream: NodeJS.ReadableStream | null;
+    if (spec.kind === 'partial') {
+      status = 206;
+      contentLength = spec.length!;
+      rangeHeader = `bytes ${spec.start}-${spec.end}/${obj.size}`;
+      stream = await storageEngine.getObjectStreamRange(obj.storagePath, spec.start!, spec.end!);
+    } else {
+      stream = await storageEngine.getObjectStream(obj.storagePath);
+    }
     if (!stream) {
       return reply.status(404).type('application/xml').send(renderS3ErrorXml('NoSuchKey', 'Object storage file missing'));
     }
 
-    // Set CORS headers
-    reply.header('Access-Control-Allow-Origin', bucket.corsOrigins || '*');
-    reply.header('Content-Type', obj.contentType);
-    reply.header('Content-Length', obj.size);
-    reply.header('ETag', obj.etag);
-    reply.header('Cache-Control', 'public, max-age=31536000');
+    reply.header('Content-Length', contentLength);
+    if (rangeHeader) reply.header('Content-Range', rangeHeader);
 
     // Log request asynchronously
     db.requestLog.create({
@@ -133,13 +162,13 @@ export async function s3Routes(fastify: FastifyInstance) {
         bucketName,
         method: 'GET',
         path: req.url,
-        status: 200,
+        status,
         ip: req.ip || '127.0.0.1',
-        bytesTransferred: obj.size,
+        bytesTransferred: contentLength,
       },
     }).catch(() => {});
 
-    return reply.send(stream);
+    return reply.status(status).send(stream);
   });
 
   // 3. PUT /s3/:bucket/* (PutObject)

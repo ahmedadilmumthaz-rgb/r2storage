@@ -1,5 +1,6 @@
 import fs from 'fs';
 import crypto from 'crypto';
+import { PassThrough } from 'stream';
 import { CONFIG } from '../config';
 
 // AES-256-GCM encryption at rest for stored blobs.
@@ -119,6 +120,10 @@ export function openEncryptedRead(filePath: string): NodeJS.ReadableStream | nul
       end: stat.size - TAG_LEN - 1, // inclusive end of the ciphertext region
     });
     body.on('error', (err) => decipher.destroy(err));
+    // If a range read tears the decipher down early (sliceStream destroys it
+    // once the requested span has been emitted), stop the file stream too so a
+    // huge blob isn't decrypted to the end just to serve a small range.
+    decipher.on('close', () => body.destroy());
     body.pipe(decipher);
     return decipher;
   } catch (err) {
@@ -153,4 +158,47 @@ export function maybeEncryptBuffer(buf: Buffer): Buffer {
   const cipher = crypto.createCipheriv('aes-256-gcm', k, iv);
   const ct = Buffer.concat([cipher.update(buf), cipher.final()]);
   return Buffer.concat([ENC_MAGIC, iv, ct, cipher.getAuthTag()]);
+}
+
+/**
+ * Forwards only the bytes in the inclusive plaintext span [start, end] of
+ * `source` and ends the returned stream once that span has been emitted.
+ * Used to serve byte-range GETs on encrypted blobs, which must be decrypted
+ * from the first byte (GCM counters cannot be seeked into) before the range
+ * can be carved out; plaintext blobs use fs.createReadStream's native
+ * { start, end } instead. `source` is destroyed early so the underlying file
+ * stops being decrypted once the requested span is past.
+ */
+export function sliceStream(source: NodeJS.ReadableStream, start: number, end: number): NodeJS.ReadableStream {
+  const out = new PassThrough();
+  // All real sources (fs streams, deciphers) are Node streams with destroy();
+  // the NodeJS.ReadableStream lib type just doesn't expose it.
+  const destroySource = () => (source as NodeJS.ReadableStream & { destroy?: () => void }).destroy?.();
+  let pos = 0;
+  let done = false;
+  source.on('data', (chunk: Buffer) => {
+    if (done) return;
+    const chunkStart = pos;
+    pos += chunk.length;
+    if (chunkStart + chunk.length - 1 < start) return;
+    if (chunkStart > end) {
+      done = true;
+      destroySource();
+      out.end();
+      return;
+    }
+    const from = Math.max(0, start - chunkStart);
+    const to = Math.min(chunk.length, end - chunkStart + 1);
+    if (from < to) out.write(chunk.subarray(from, to));
+    if (chunkStart + to - 1 >= end) {
+      done = true;
+      destroySource();
+      out.end();
+    }
+  });
+  source.on('error', (err) => out.destroy(err));
+  source.on('end', () => {
+    if (!done) out.end();
+  });
+  return out;
 }

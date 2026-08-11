@@ -38,7 +38,7 @@ platform/         Next.js SaaS control plane (signup, provisioning, metering, St
   lib/               provision.ts, nginx.ts, usage.ts, stripe.ts, session.ts, ...
 deploy/           baremetal nginx/systemd templates + SaaS VPS installer
 deploy.sh         parameterized baremetal installer (INSTANCE/PORT/BASE_DOMAIN)
-scripts/          smoke.sh (backend, 75 checks), platform-smoke.sh, sec-check.sh
+scripts/          smoke.sh (backend, 96 checks), platform-smoke.sh, sec-check.sh
 examples/         integration recipes (browser-upload, nextjs-uploader, laravel, ...)
 ```
 
@@ -47,7 +47,7 @@ examples/         integration recipes (browser-upload, nextjs-uploader, laravel,
 ```bash
 npm install --prefix backend && npm install --prefix frontend   # deps
 npm run build            # tsc backend + vite frontend
-npm test                 # scripts/smoke.sh — boots a throwaway backend, 75 checks
+npm test                 # scripts/smoke.sh — boots a throwaway backend, 96 checks
 npm run test:platform    # platform E2E smoke (needs a running platform first)
 npm run lint --prefix platform    # eslint (platform only; backend/frontend have no lint)
 bash scripts/sec-check.sh         # ad-hoc security spot-checks (spins a temp server)
@@ -131,6 +131,11 @@ proves the property (see the `auth hardening` section).
   frontend talks to `/api/admin/*` with a session cookie. Public bucket objects
   are also served on custom-domain hosts (`cdn.<domain>/<key>`,
   `<bucket>.<domain>/<key>`) via `tryServePublicObject`.
+- **Range + conditional GET** (`Range` → 206/416, `If-None-Match`/
+  `If-Modified-Since` → 304) is shared between the S3 and public routes
+  (`api/range.ts`). Plaintext blobs use `fs` native range reads; encrypted blobs
+  must be decrypted from byte 0 (GCM counters can't seek), so ranges are carved
+  out of the decrypted stream via `sliceStream` (`storage/crypto.ts`).
 - **Multipart uploads** go through `storageEngine` (`savePartFromStream` →
   `assembleUpload`), with DB rows in `MultipartUpload`/`MultipartPart`; abandoned
   uploads are swept by `maintenance.ts`.

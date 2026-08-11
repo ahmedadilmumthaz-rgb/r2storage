@@ -2,7 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
 import { CONFIG } from '../config';
-import { EncryptedWrite, openEncryptedRead, encryptionEnabled, maybeDecryptBuffer, maybeEncryptBuffer } from './crypto';
+import { EncryptedWrite, openEncryptedRead, encryptionEnabled, maybeDecryptBuffer, maybeEncryptBuffer, sliceStream } from './crypto';
 
 export class StorageEngine {
   private baseDir: string;
@@ -170,6 +170,25 @@ export class StorageEngine {
     // Decrypt when the blob carries the encryption magic; plaintext (legacy or
     // key-less) blobs stream through untouched.
     return openEncryptedRead(filePath) ?? fs.createReadStream(filePath);
+  }
+
+  // Inclusive plaintext byte range [start, end] of a blob. Plaintext files use
+  // fs's native range reads (O(1) seek); encrypted blobs must be decrypted in
+  // full first (see sliceStream), which is correct though CPU-bound for huge
+  // objects — the tradeoff of whole-file GCM.
+  async getObjectStreamRange(
+    filePath: string,
+    start: number,
+    end: number,
+  ): Promise<NodeJS.ReadableStream | null> {
+    if (!fs.existsSync(filePath)) {
+      return null;
+    }
+    const decrypted = openEncryptedRead(filePath);
+    if (decrypted) {
+      return sliceStream(decrypted, start, end);
+    }
+    return fs.createReadStream(filePath, { start, end });
   }
 
   async getObjectBuffer(filePath: string): Promise<Buffer | null> {

@@ -225,6 +225,37 @@ check "usage reports a request" "2" "$(json_field "$R" requests)"
 R=$(curl -s -H "X-Admin-Secret: $ADMIN_SECRET" "$B/api/admin/usage?since=$(node -e 'console.log(new Date(Date.now()+3600000).toISOString())')")
 check "usage since-future counts nothing" "0" "$(json_field "$R" requests)"
 
+# --- byte-range + conditional GET --------------------------------------------------
+# hello.txt = 'smoke-test-content' (18 bytes):  0-4='smoke' 5-='-test-content'
+# -5='ntent' 6-11='test-c'. Booted with STORAGE_ENCRYPTION_KEY, so ranged reads
+# exercise the decrypt-and-slice path (sliceStream).
+echo "== Range + conditional GET =="
+AUTH_OPTS=(-H "x-access-key-id: $AK" -H "x-access-key-secret: $SK")
+check "Range bytes=0-4 -> 206" "206" "$(status_of "${AUTH_OPTS[@]}" -H "Range: bytes=0-4" "$B/s3/smoke/hello.txt")"
+check "Range bytes=0-4 body" "smoke" "$(curl -s "${AUTH_OPTS[@]}" -H "Range: bytes=0-4" "$B/s3/smoke/hello.txt")"
+check "Range bytes=0-4 Content-Range" "bytes 0-4/18" "$(curl -s -D - -o /dev/null "${AUTH_OPTS[@]}" -H "Range: bytes=0-4" "$B/s3/smoke/hello.txt" | grep -i '^content-range:' | tr -d '\r' | cut -d' ' -f2-)"
+check "Range bytes=0-4 Content-Length" "5" "$(curl -s -D - -o /dev/null "${AUTH_OPTS[@]}" -H "Range: bytes=0-4" "$B/s3/smoke/hello.txt" | grep -i '^content-length:' | tr -d '\r' | cut -d' ' -f2)"
+check "Range open-ended bytes=5- body" "-test-content" "$(curl -s "${AUTH_OPTS[@]}" -H "Range: bytes=5-" "$B/s3/smoke/hello.txt")"
+check "Range suffix bytes=-5 body" "ntent" "$(curl -s "${AUTH_OPTS[@]}" -H "Range: bytes=-5" "$B/s3/smoke/hello.txt")"
+check "Range middle bytes=6-11 body" "test-c" "$(curl -s "${AUTH_OPTS[@]}" -H "Range: bytes=6-11" "$B/s3/smoke/hello.txt")"
+check "Range past-end clamps to EOF" "8" "$(curl -s -D - -o /dev/null "${AUTH_OPTS[@]}" -H "Range: bytes=10-99" "$B/s3/smoke/hello.txt" | grep -i '^content-length:' | tr -d '\r' | cut -d' ' -f2)"
+check "unsatisfiable Range -> 416" "416" "$(status_of "${AUTH_OPTS[@]}" -H "Range: bytes=99-100" "$B/s3/smoke/hello.txt")"
+check "416 includes Content-Range */size" "bytes */18" "$(curl -s -D - -o /dev/null "${AUTH_OPTS[@]}" -H "Range: bytes=99-100" "$B/s3/smoke/hello.txt" | grep -i '^content-range:' | tr -d '\r' | cut -d' ' -f2-)"
+check "malformed Range falls back to full 200" "200" "$(status_of "${AUTH_OPTS[@]}" -H "Range: bytes=abc" "$B/s3/smoke/hello.txt")"
+check "malformed Range body is full object" "smoke-test-content" "$(curl -s "${AUTH_OPTS[@]}" -H "Range: bytes=abc" "$B/s3/smoke/hello.txt")"
+: > "$TMP/empty.txt"
+check "PUT empty object" "200" "$(status_of -X PUT "${AUTH_OPTS[@]}" --data-binary @"$TMP/empty.txt" "$B/s3/smoke/empty.txt")"
+check "Range on empty object -> 416" "416" "$(status_of "${AUTH_OPTS[@]}" -H "Range: bytes=0-0" "$B/s3/smoke/empty.txt")"
+
+ETAG="$(curl -s -I "${AUTH_OPTS[@]}" "$B/s3/smoke/hello.txt" | grep -i '^etag:' | tr -d '\r' | cut -d' ' -f2)"
+[ -n "$ETAG" ] || { echo "✗ no ETag"; exit 1; }
+check "If-None-Match matching ETag -> 304" "304" "$(status_of "${AUTH_OPTS[@]}" -H "If-None-Match: $ETAG" "$B/s3/smoke/hello.txt")"
+check "If-None-Match * -> 304" "304" "$(status_of "${AUTH_OPTS[@]}" -H "If-None-Match: *" "$B/s3/smoke/hello.txt")"
+check "If-None-Match non-matching -> 200" "200" "$(status_of "${AUTH_OPTS[@]}" -H 'If-None-Match: "bogus"' "$B/s3/smoke/hello.txt")"
+check "If-Modified-Since now -> 304" "304" "$(status_of "${AUTH_OPTS[@]}" -H "If-Modified-Since: $(date -u +'%a, %d %b %Y %H:%M:%S GMT')" "$B/s3/smoke/hello.txt")"
+check "If-Modified-Since past -> 200" "200" "$(status_of "${AUTH_OPTS[@]}" -H 'If-Modified-Since: Sat, 01 Jan 2000 00:00:00 GMT' "$B/s3/smoke/hello.txt")"
+check "304 sends ETag header" "1" "$(curl -s -D - -o /dev/null "${AUTH_OPTS[@]}" -H "If-None-Match: $ETAG" "$B/s3/smoke/hello.txt" | grep -ic '^etag:')"
+
 # --- multipart ------------------------------------------------------------------
 echo "== multipart upload =="
 R=$(curl -s -X POST -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" "$B/s3/smoke/big.bin?uploads")
@@ -261,6 +292,7 @@ check "presigned GET" "smoke-test-content" "$R"
 
 curl -s -o /dev/null -b "$COOKIES" -X PATCH -H "Content-Type: application/json" -d '{"isPublic":true}' "$B/api/admin/buckets/smoke"
 check "public bucket anonymous GET" "200" "$(status_of "$B/s3/smoke/hello.txt")"
+check "public bucket anonymous Range -> 206" "206" "$(status_of -H 'Range: bytes=0-4' "$B/s3/smoke/hello.txt")"
 
 # --- logout + revocation (before the hammer, to avoid rate-limit cross-talk) -------
 echo "== logout revokes session =="

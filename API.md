@@ -84,7 +84,7 @@ GET|PUT|HEAD|POST|DELETE  /s3/<bucket>[/<key>][?query]
 | --- | --- | --- | --- |
 | ListObjectsV2 | `GET /s3/<bucket>?prefix=<p>` | public buckets: none; private: read | XML `<ListBucketResult>`; up to 1000 keys |
 | PutObject | `PUT /s3/<bucket>/<key>` | write | body is streamed to disk; returns `ETag` header |
-| GetObject | `GET /s3/<bucket>/<key>` | public: none; private: read | streams body; sets `Content-Type`, `ETag`, `Content-Length` |
+| GetObject | `GET /s3/<bucket>/<key>` | public: none; private: read | streams body; sets `Content-Type`, `ETag`, `Content-Length`; supports **byte-range + conditional GET** (below) |
 | HeadObject | `HEAD /s3/<bucket>/<key>` | public: none; private: read | headers only, no body |
 | DeleteObject | `DELETE /s3/<bucket>/<key>` | **full** | `204` |
 | CreateMultipartUpload | `POST /s3/<bucket>/<key>?uploads` | write | XML with `<UploadId>` |
@@ -100,6 +100,19 @@ GET|PUT|HEAD|POST|DELETE  /s3/<bucket>[/<key>][?query]
   <Error><Code>NoSuchKey</Code><Message>The specified key does not exist.</Message></Error>
   ```
 - Common codes: `AccessDenied` (403), `NoSuchBucket` / `NoSuchKey` (404), `NoSuchUpload` (404), `InvalidPart` / `InvalidPartOrder` (400), `InvalidRequest` (400).
+
+### 2.3 Range + conditional GET
+
+`GetObject` (and the custom-domain public route, `https://cdn.<domain>/<key>`) honors S3-compatible byte ranges and HTTP validators:
+
+| Header | Behavior |
+|---|---|
+| `Range: bytes=0-99` / `bytes=100-` / `bytes=-500` | `206 Partial Content` with `Content-Range: bytes <start>-<end>/<size>`. A single range only; malformed or multi-range requests fall back to `200` with the full object. |
+| Unsatisfiable range (start ≥ size, or size 0) | `416 Range Not Satisfiable` with `Content-Range: bytes */<size>` and `<Code>InvalidRange</Code>` |
+| `If-None-Match: <etag>` (or `*`) | `304 Not Modified` (also honors weak `W/` and bare tags). Takes precedence over `If-Modified-Since`. |
+| `If-Modified-Since: <http-date>` | `304 Not Modified` when the object hasn't been modified since (second granularity) |
+
+`ETag` values are quoted MD5-of-plaintext (e.g. `"9c2e4d5f..."`); `Accept-Ranges: bytes` is advertised on object GETs. Range reads of encrypted blobs decrypt in full then slice (whole-file GCM can't seek), so ranged requests on huge encrypted objects are CPU-bound.
 
 ### 2.3 Public vs private buckets
 
