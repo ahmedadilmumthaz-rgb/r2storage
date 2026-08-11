@@ -4,6 +4,7 @@ import { secretsEqual } from '../auth/secrets';
 import { SESSION_COOKIE, createSession, destroySession, getSession, sessionCookieOptions } from '../auth/session';
 import { isLockedOut, recordFailure, resetLockout } from '../auth/lockout';
 import { auditLog } from '../auth/audit';
+import { verifyTotp } from '../auth/totp';
 import { db } from '../db';
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -23,7 +24,7 @@ const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve,
  */
 export async function authRoutes(fastify: FastifyInstance) {
   fastify.post('/api/admin/login', async (req: FastifyRequest, reply) => {
-    const { secret } = (req.body || {}) as { secret?: string };
+    const { secret, totp } = (req.body || {}) as { secret?: string; totp?: string };
 
     const locked = isLockedOut(req.ip);
     if (locked.locked) {
@@ -40,6 +41,19 @@ export async function authRoutes(fastify: FastifyInstance) {
       recordFailure(req.ip, 'both');
       await sleep(CONFIG.LOGIN_FAILURE_DELAY_MS);
       return reply.status(401).send({ error: 'Unauthorized. Invalid admin secret.' });
+    }
+
+    // When ADMIN_TOTP_SECRET is configured, the secret alone is not enough: the
+    // dashboard must also present a valid 6-digit authenticator code. A missing
+    // or wrong code fails identically to a wrong secret (same lockout, delay,
+    // and FailedLogin row) so an attacker can't tell which factor they missed.
+    if (CONFIG.ADMIN_TOTP_SECRET && !verifyTotp(CONFIG.ADMIN_TOTP_SECRET, totp)) {
+      db.failedLogin.create({
+        data: { ip: req.ip || 'unknown', userAgent: (req.headers['user-agent'] as string) || null },
+      }).catch(() => {});
+      recordFailure(req.ip, 'both');
+      await sleep(CONFIG.LOGIN_FAILURE_DELAY_MS);
+      return reply.status(401).send({ error: 'Unauthorized. Invalid two-factor code.' });
     }
 
     resetLockout(req.ip);

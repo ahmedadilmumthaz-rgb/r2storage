@@ -38,7 +38,7 @@ platform/         Next.js SaaS control plane (signup, provisioning, metering, St
   lib/               provision.ts, nginx.ts, usage.ts, stripe.ts, session.ts, ...
 deploy/           baremetal nginx/systemd templates + SaaS VPS installer
 deploy.sh         parameterized baremetal installer (INSTANCE/PORT/BASE_DOMAIN)
-scripts/          smoke.sh (backend, 71 checks), platform-smoke.sh, sec-check.sh
+scripts/          smoke.sh (backend, 75 checks), platform-smoke.sh, sec-check.sh
 examples/         integration recipes (browser-upload, nextjs-uploader, laravel, ...)
 ```
 
@@ -47,7 +47,7 @@ examples/         integration recipes (browser-upload, nextjs-uploader, laravel,
 ```bash
 npm install --prefix backend && npm install --prefix frontend   # deps
 npm run build            # tsc backend + vite frontend
-npm test                 # scripts/smoke.sh — boots a throwaway backend, 71 checks
+npm test                 # scripts/smoke.sh — boots a throwaway backend, 75 checks
 npm run test:platform    # platform E2E smoke (needs a running platform first)
 npm run lint --prefix platform    # eslint (platform only; backend/frontend have no lint)
 bash scripts/sec-check.sh         # ad-hoc security spot-checks (spins a temp server)
@@ -98,7 +98,10 @@ explicit, reviewed reason.**
     per-IP block + doubling global cooldown, capped) and written to a
     `FailedLogin` audit table; privileged admin actions land in an `AuditLog`
     table (`audit.ts`, surfaced at `GET /api/admin/audit`) with the auth source
-    recorded. Extend `scripts/smoke.sh` / `sec-check.sh` when touching this
+    recorded. Optional TOTP 2FA (`ADMIN_TOTP_SECRET`, base32 RFC 6238 secret,
+    `auth/totp.ts`) makes the dashboard login require a 6-digit authenticator
+    code on top of the secret; the `x-admin-secret` header (machine access)
+    is exempt. Extend `scripts/smoke.sh` / `sec-check.sh` when touching this
     behavior.
 5. **Object storage.** Blobs are stored under sha256-derived paths — a key can
    never traverse directories. Quota is enforced pre-write (Content-Length) and

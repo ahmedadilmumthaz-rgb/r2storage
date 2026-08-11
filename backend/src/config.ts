@@ -15,6 +15,11 @@ export const CONFIG = {
   // at rest with a per-object random IV; existing plaintext blobs stay readable.
   STORAGE_ENCRYPTION_KEY: process.env.STORAGE_ENCRYPTION_KEY || '',
   ADMIN_SECRET: process.env.ADMIN_SECRET || 'r2storage-admin-secret-key-change-me',
+  // Optional TOTP base32 secret (RFC 6238, e.g. Google Authenticator). When set,
+  // the dashboard login requires a valid 6-digit code in the `totp` field on top
+  // of ADMIN_SECRET. Machine access via the x-admin-secret header is exempt (it
+  // already carries a long random secret). Generate with: openssl rand -base64 20
+  ADMIN_TOTP_SECRET: process.env.ADMIN_TOTP_SECRET || '',
   BASE_DOMAIN: process.env.BASE_DOMAIN || 'localhost',
   // Optional comma-separated CIDRs (IPv4/IPv6) that may reach /api/admin/*
   // including login; empty = allow all. Enforced via req.ip (CF-Connecting-IP).

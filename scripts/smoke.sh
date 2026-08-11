@@ -390,6 +390,50 @@ check "allowlist: login gated too -> 403" "403" "$(status_of -H "X-Forwarded-For
 check "allowlist: real IP can still log in -> 200" "200" "$(status_of -X POST -H "Content-Type: application/json" -d "{\"secret\":\"$ADMIN_SECRET\"}" "$B3/api/admin/login")"
 kill "$SERVER3_PID" 2>/dev/null; wait "$SERVER3_PID" 2>/dev/null
 
+# --- TOTP 2FA (fourth throwaway boot, ADMIN_TOTP_SECRET enabled) -----------------
+# With a TOTP secret set, the login route requires a valid 6-digit code on top of
+# ADMIN_SECRET; machine access via the x-admin-secret header stays exempt.
+echo "== TOTP 2FA =="
+TOTP_SECRET="JBSWY3DPEHPK3PXP"
+PORT4=$((PORT + 3))
+DB4="$TMP/totp.db"
+STORE4="$TMP/store4"
+LOG4="$TMP/server4.log"
+mkdir -p "$STORE4"
+(
+  cd "$BACKEND"
+  DATABASE_URL="file:$DB4" npx prisma db push >/dev/null 2>&1
+)
+(
+  cd "$BACKEND"
+  exec env PORT="$PORT4" HOST=127.0.0.1 DATABASE_URL="file:$DB4" STORAGE_DIR="$STORE4" \
+    ADMIN_SECRET="$ADMIN_SECRET" BASE_DOMAIN=localhost NODE_ENV=production \
+    LOGIN_FAIL_THRESHOLD=3 LOGIN_GLOBAL_THRESHOLD=20 LOGIN_IP_COOLDOWN_SEC=60 \
+    LOGIN_GLOBAL_COOLDOWN_SEC=60 LOGIN_FAILURE_DELAY_MS=1 \
+    ADMIN_TOTP_SECRET="$TOTP_SECRET" \
+    node dist/index.js >"$LOG4" 2>&1
+) &
+SERVER4_PID=$!
+B4="http://127.0.0.1:$PORT4"
+for _ in $(seq 1 50); do
+  curl -sf "$B4/health" >/dev/null 2>&1 && break
+  sleep 0.2
+done
+# Build JSON bodies via printf into variables: a literal comma inside braces in
+# the shell source would be brace-expanded into broken -d args (e.g. splitting
+# {"a":..,"b":..} into two curls).
+BODY="$(printf '{"secret":"%s"}' "$ADMIN_SECRET")"
+check "totp: missing code rejected" "401" "$(status_of -X POST -H "Content-Type: application/json" -d "$BODY" "$B4/api/admin/login")"
+BODY="$(printf '{"secret":"%s","totp":"%s"}' "$ADMIN_SECRET" "000000")"
+check "totp: wrong code rejected" "401" "$(status_of -X POST -H "Content-Type: application/json" -d "$BODY" "$B4/api/admin/login")"
+# Mint a valid code with the same module the server verifies against, at wall-clock now.
+GOOD_CODE="$(node -e 'const {totpCode}=require(process.argv[1]); process.stdout.write(totpCode(process.argv[2], Math.floor(Date.now()/1000)))' "$BACKEND/dist/auth/totp.js" "$TOTP_SECRET")"
+[ -n "$GOOD_CODE" ] || { echo "✗ could not mint a TOTP code"; exit 1; }
+BODY="$(printf '{"secret":"%s","totp":"%s"}' "$ADMIN_SECRET" "$GOOD_CODE")"
+check "totp: valid code accepted" "200" "$(status_of -X POST -H "Content-Type: application/json" -d "$BODY" "$B4/api/admin/login")"
+check "totp: header auth bypasses 2FA -> 200" "200" "$(status_of -H "X-Admin-Secret: $ADMIN_SECRET" "$B4/api/admin/overview")"
+kill "$SERVER4_PID" 2>/dev/null; wait "$SERVER4_PID" 2>/dev/null
+
 # --- summary ----------------------------------------------------------------------
 echo
 echo "== smoke result: $PASS passed, $FAIL failed =="

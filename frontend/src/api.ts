@@ -19,11 +19,11 @@ export function onUnauthorized(cb: () => void): () => void {
   return () => window.removeEventListener('r2:unauthorized', cb);
 }
 
-export async function login(secret: string): Promise<number> {
+export async function login(secret: string, totp?: string): Promise<number> {
   const res = await fetch('/api/admin/login', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ secret }),
+    body: JSON.stringify({ secret, ...(totp ? { totp } : {}) }),
   });
   return res.status;
 }

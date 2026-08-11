@@ -1,9 +1,10 @@
 import React, { useState } from 'react';
-import { Cloud, KeyRound, Lock } from 'lucide-react';
+import { Cloud, KeyRound, Lock, ShieldCheck } from 'lucide-react';
 import { login } from '../api';
 
 export const Login: React.FC<{ onAuthenticated: () => void }> = ({ onAuthenticated }) => {
   const [secret, setSecret] = useState('');
+  const [totp, setTotp] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
 
@@ -13,13 +14,13 @@ export const Login: React.FC<{ onAuthenticated: () => void }> = ({ onAuthenticat
     setLoading(true);
     setError('');
     try {
-      const status = await login(secret);
+      const status = await login(secret, totp.trim() || undefined);
       if (status === 200) {
         onAuthenticated();
       } else if (status === 429) {
         setError('Too many failed attempts — this IP is temporarily locked out.');
       } else {
-        setError('Invalid admin secret.');
+        setError('Invalid admin secret or authenticator code.');
       }
     } catch {
       setError('Could not reach the server. Check that it is running.');
@@ -54,6 +55,21 @@ export const Login: React.FC<{ onAuthenticated: () => void }> = ({ onAuthenticat
                 onChange={(e) => setSecret(e.target.value)}
                 className="w-full bg-dark-900 border border-slate-700 rounded-xl px-4 py-2.5 text-sm text-white focus:outline-none focus:border-brand-500 font-mono"
                 autoFocus
+              />
+            </div>
+
+            <div>
+              <label className="block text-xs font-medium text-slate-300 mb-1 flex items-center gap-1.5">
+                <ShieldCheck className="w-3.5 h-3.5" /> Authenticator Code <span className="text-slate-500">(required if 2FA is enabled)</span>
+              </label>
+              <input
+                type="text"
+                inputMode="numeric"
+                autoComplete="one-time-code"
+                placeholder="6-digit code from your authenticator app"
+                value={totp}
+                onChange={(e) => setTotp(e.target.value)}
+                className="w-full bg-dark-900 border border-slate-700 rounded-xl px-4 py-2.5 text-sm text-white focus:outline-none focus:border-brand-500 font-mono tracking-widest"
               />
             </div>
 
