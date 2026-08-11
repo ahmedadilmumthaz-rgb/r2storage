@@ -12,6 +12,7 @@ model Bucket {
   name        String   @unique
   isPublic    Boolean  @default(false)
   corsOrigins String   @default("*") // JSON or comma-separated origins
+  lifecycleRules String? // JSON stringified lifecycle rules (PutBucketLifecycle)
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
   objects     Object[]

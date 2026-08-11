@@ -101,6 +101,7 @@ echo "== booting throwaway instance on :$PORT =="
     LOGIN_FAIL_THRESHOLD=3 LOGIN_GLOBAL_THRESHOLD=5 LOGIN_IP_COOLDOWN_SEC=60 \
     LOGIN_GLOBAL_COOLDOWN_SEC=60 LOGIN_FAILURE_DELAY_MS=1 \
     ADMIN_SESSION_TTL_HOURS=0.01 \
+    MAINTENANCE_SWEEP_INTERVAL_MS=2000 \
     node dist/index.js >"$LOG" 2>&1
 ) &
 SERVER_PID=$!
@@ -452,6 +453,38 @@ check "GetObjectAttributes" "1" "$(curl -s "${AUTH_OPTS[@]}" "$B/s3/smoke/hello.
 check "GetObjectAttributes size" "18" "$(curl -s "${AUTH_OPTS[@]}" "$B/s3/smoke/hello.txt?attributes" | sed -n 's:.*<ObjectSize>\([0-9]*\)</ObjectSize>.*:\1:p')"
 check "GetObjectAttributes checksum block" "1" "$(curl -s "${AUTH_OPTS[@]}" -H 'x-amz-checksum-mode: enabled' "$B/s3/smoke/crccheck.txt?attributes" | grep -c '<ChecksumCRC32>')"
 check "GetObjectAttributes missing -> 404" "404" "$(status_of "${AUTH_OPTS[@]}" "$B/s3/smoke/nope.txt?attributes")"
+
+# --- bucket lifecycle ----------------------------------------------------------
+echo "== bucket lifecycle =="
+LIFECYCLE_OK='<LifecycleConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Rule><ID>keep30</ID><Filter><Prefix>logs/</Prefix></Filter><Status>Enabled</Status><Expiration><Days>30</Days></Expiration></Rule><Rule><ID>retired</ID><Filter><Prefix>old/</Prefix></Filter><Status>Disabled</Status><Expiration><Days>7</Days></Expiration></Rule></LifecycleConfiguration>'
+LIFEMD5="$(printf '%s' "$LIFECYCLE_OK" | openssl dgst -md5 -binary | base64)"
+check "PUT ?lifecycle (with Content-MD5)" "200" "$(status_of -X PUT "${AUTH_OPTS[@]}" -H "Content-MD5: $LIFEMD5" --data "$LIFECYCLE_OK" "$B/s3/smoke?lifecycle")"
+check "PUT ?lifecycle wrong Content-MD5 -> 400" "400" "$(status_of -X PUT "${AUTH_OPTS[@]}" -H 'Content-MD5: QUJDRA==' --data "$LIFECYCLE_OK" "$B/s3/smoke?lifecycle")"
+check "GET ?lifecycle returns config" "1" "$(curl -s "${AUTH_OPTS[@]}" "$B/s3/smoke?lifecycle" | grep -c '<LifecycleConfiguration')"
+check "GET ?lifecycle echoes rule ID" "1" "$(curl -s "${AUTH_OPTS[@]}" "$B/s3/smoke?lifecycle" | grep -c '<ID>keep30</ID>')"
+check "GET ?lifecycle echoes prefix filter" "1" "$(curl -s "${AUTH_OPTS[@]}" "$B/s3/smoke?lifecycle" | grep -c '<Prefix>logs/</Prefix>')"
+check "GET ?lifecycle echoes Enabled+days" "1" "$(curl -s "${AUTH_OPTS[@]}" "$B/s3/smoke?lifecycle" | grep -c '<Status>Enabled</Status>')"
+check "GET ?lifecycle echoes Disabled rule" "1" "$(curl -s "${AUTH_OPTS[@]}" "$B/s3/smoke?lifecycle" | grep -c '<Status>Disabled</Status>')"
+check "PUT ?lifecycle malformed XML -> 400" "400" "$(status_of -X PUT "${AUTH_OPTS[@]}" --data '<LifecycleConfiguration><Rule><Status>Enabled</Status>' "$B/s3/smoke?lifecycle")"
+check "PUT ?lifecycle missing expiration -> 400" "400" "$(status_of -X PUT "${AUTH_OPTS[@]}" --data '<LifecycleConfiguration><Rule><ID>x</ID><Filter><Prefix>a/</Prefix></Filter><Status>Enabled</Status></Rule></LifecycleConfiguration>' "$B/s3/smoke?lifecycle")"
+check "PUT ?lifecycle days=0 -> 400" "400" "$(status_of -X PUT "${AUTH_OPTS[@]}" --data '<LifecycleConfiguration><Rule><Filter><Prefix>a/</Prefix></Filter><Status>Enabled</Status><Expiration><Days>0</Days></Expiration></Rule></LifecycleConfiguration>' "$B/s3/smoke?lifecycle")"
+check "PUT ?lifecycle days+date conflict -> 400" "400" "$(status_of -X PUT "${AUTH_OPTS[@]}" --data '<LifecycleConfiguration><Rule><Filter><Prefix>a/</Prefix></Filter><Status>Enabled</Status><Expiration><Days>1</Days><Date>2026-01-01</Date></Expiration></Rule></LifecycleConfiguration>' "$B/s3/smoke?lifecycle")"
+check "PUT ?lifecycle unknown bucket -> 404" "404" "$(status_of -X PUT "${AUTH_OPTS[@]}" --data "$LIFECYCLE_OK" "$B/s3/no-such-bucket?lifecycle")"
+check "bucket-level PUT without subresource -> 400" "400" "$(status_of -X PUT "${AUTH_OPTS[@]}" --data x "$B/s3/smoke")"
+check "bucket-level DELETE without subresource -> 400" "400" "$(status_of -X DELETE "${AUTH_OPTS[@]}" "$B/s3/smoke")"
+
+# Expiry e2e: a past-date rule + the 2s sweep interval must delete matching
+# objects. A dedicated prefix keeps the other smoke objects untouched.
+check "seed object for expiry" "200" "$(status_of -X PUT "${AUTH_OPTS[@]}" --data-binary 'doomed' "$B/s3/smoke/expired/doomed.txt")"
+LIFEEXPIRE='<LifecycleConfiguration><Rule><ID>now</ID><Filter><Prefix>expired/</Prefix></Filter><Status>Enabled</Status><Expiration><Date>2000-01-01</Date></Expiration></Rule></LifecycleConfiguration>'
+check "PUT ?lifecycle past-date rule" "200" "$(status_of -X PUT "${AUTH_OPTS[@]}" --data "$LIFEEXPIRE" "$B/s3/smoke?lifecycle")"
+sleep 3
+check "past-date rule expires object (GET 404)" "404" "$(status_of "${AUTH_OPTS[@]}" "$B/s3/smoke/expired/doomed.txt")"
+check "expired object gone from listing" "0" "$(curl -s "${AUTH_OPTS[@]}" "$B/s3/smoke?list-type=2&prefix=expired/" | grep -c 'doomed.txt')"
+check "unrelated keys survive the sweep" "200" "$(status_of "${AUTH_OPTS[@]}" "$B/s3/smoke/hello.txt")"
+
+check "DELETE ?lifecycle" "204" "$(status_of -X DELETE "${AUTH_OPTS[@]}" "$B/s3/smoke?lifecycle")"
+check "GET ?lifecycle after delete -> 404" "404" "$(status_of "${AUTH_OPTS[@]}" "$B/s3/smoke?lifecycle")"
 
 # --- multipart ------------------------------------------------------------------
 echo "== multipart upload =="

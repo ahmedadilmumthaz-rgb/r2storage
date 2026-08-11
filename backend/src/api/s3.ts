@@ -16,6 +16,12 @@ import {
   tagCount,
   renderTaggingXml,
 } from './tags';
+import {
+  parseLifecycleXml,
+  serializeLifecycleRules,
+  deserializeLifecycleRules,
+  renderLifecycleXml,
+} from './lifecycle';
 
 function bodyAsStream(body: unknown): NodeJS.ReadableStream {
   if (body && typeof (body as any).pipe === 'function') {
@@ -254,8 +260,13 @@ export async function s3Routes(fastify: FastifyInstance) {
             `<?xml version="1.0" encoding="UTF-8"?>
 <Tagging xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><TagSet/></Tagging>`
           );
-        case 'lifecycle':
-          return reply.status(404).type('application/xml').send(renderS3ErrorXml('NoSuchLifecycleConfiguration', 'The lifecycle configuration does not exist.'));
+        case 'lifecycle': {
+          const rules = deserializeLifecycleRules(bucket.lifecycleRules);
+          if (rules.length === 0) {
+            return reply.status(404).type('application/xml').send(renderS3ErrorXml('NoSuchLifecycleConfiguration', 'The lifecycle configuration does not exist.'));
+          }
+          return reply.status(200).type('application/xml').send(renderLifecycleXml(rules));
+        }
         case 'encryption':
           return reply.status(404).type('application/xml').send(
             renderS3ErrorXml('ServerSideEncryptionConfigurationNotFoundError', 'The server side encryption configuration was not found.')
@@ -366,6 +377,106 @@ export async function s3Routes(fastify: FastifyInstance) {
       encodingType: encodingType || undefined,
     });
     return reply.status(200).type('application/xml').send(xml);
+  });
+
+  // 1b. PUT /s3/:bucket (PutBucketLifecycle). Bucket-level PUTs only support
+  // the ?lifecycle subresource; anything else is InvalidRequest.
+  fastify.put('/s3/:bucket', async (req: FastifyRequest, reply: FastifyReply) => {
+    const { bucket: bucketName } = req.params as { bucket: string };
+    const query = req.query as Record<string, string>;
+
+    const bucket = await db.bucket.findUnique({ where: { name: bucketName } });
+    if (!bucket) {
+      return reply.status(404).type('application/xml').send(renderS3ErrorXml('NoSuchBucket', 'The specified bucket does not exist.'));
+    }
+
+    const auth = await S3Auth.authenticateRequest(req.headers, query, req.method, req.url);
+    if (!auth.authenticated) {
+      return reply.status(403).type('application/xml').send(renderS3ErrorXml('AccessDenied', auth.error || 'Access Denied'));
+    }
+    const denied = permissionDenied(auth, bucketName, 'write');
+    if (denied) {
+      return reply.status(403).type('application/xml').send(renderS3ErrorXml('AccessDenied', denied));
+    }
+
+    if (query['lifecycle'] === undefined) {
+      return reply.status(400).type('application/xml').send(
+        renderS3ErrorXml('InvalidRequest', 'Bucket-level PUT only supports the lifecycle subresource.')
+      );
+    }
+
+    let body: string;
+    try {
+      body = await streamToString(bodyAsStream(req.body), MAX_COMPLETE_XML_BYTES);
+    } catch {
+      return reply.status(413).type('application/xml').send(
+        renderS3ErrorXml('EntityTooLarge', 'The PutBucketLifecycle body exceeds the 1MB limit.')
+      );
+    }
+
+    // Content-MD5 is verified against the body when supplied (AWS makes it
+    // mandatory here; we accept its absence but never skip a provided one).
+    const md5Header = (req.headers['content-md5'] as string | undefined)?.trim();
+    if (md5Header) {
+      const supplied = Buffer.from(md5Header, 'base64');
+      const computed = crypto.createHash('md5').update(body, 'utf8').digest();
+      if (
+        supplied.length === 0 ||
+        supplied.toString('base64') !== md5Header ||
+        supplied.length !== computed.length ||
+        !crypto.timingSafeEqual(supplied, computed)
+      ) {
+        return reply.status(400).type('application/xml').send(
+          renderS3ErrorXml('BadDigest', 'The Content-MD5 you specified did not match what we received.')
+        );
+      }
+    }
+
+    const rules = parseLifecycleXml(body);
+    if (!rules) {
+      return reply.status(400).type('application/xml').send(
+        renderS3ErrorXml('MalformedXML', 'The XML you provided was not well-formed or did not validate against our published schema.')
+      );
+    }
+
+    await db.bucket.update({
+      where: { id: bucket.id },
+      data: { lifecycleRules: serializeLifecycleRules(rules) },
+    });
+
+    reply.header('Access-Control-Allow-Origin', bucket.corsOrigins || '*');
+    return reply.status(200).type('application/xml').send(
+      `<?xml version="1.0" encoding="UTF-8"?><LifecycleConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"/>`
+    );
+  });
+
+  // 1c. DELETE /s3/:bucket (DeleteBucketLifecycle).
+  fastify.delete('/s3/:bucket', async (req: FastifyRequest, reply: FastifyReply) => {
+    const { bucket: bucketName } = req.params as { bucket: string };
+    const query = req.query as Record<string, string>;
+
+    const bucket = await db.bucket.findUnique({ where: { name: bucketName } });
+    if (!bucket) {
+      return reply.status(404).type('application/xml').send(renderS3ErrorXml('NoSuchBucket', 'The specified bucket does not exist.'));
+    }
+
+    const auth = await S3Auth.authenticateRequest(req.headers, query, req.method, req.url);
+    if (!auth.authenticated) {
+      return reply.status(403).type('application/xml').send(renderS3ErrorXml('AccessDenied', auth.error || 'Access Denied'));
+    }
+    const denied = permissionDenied(auth, bucketName, 'write');
+    if (denied) {
+      return reply.status(403).type('application/xml').send(renderS3ErrorXml('AccessDenied', denied));
+    }
+
+    if (query['lifecycle'] === undefined) {
+      return reply.status(400).type('application/xml').send(
+        renderS3ErrorXml('InvalidRequest', 'Bucket-level DELETE only supports the lifecycle subresource.')
+      );
+    }
+
+    await db.bucket.update({ where: { id: bucket.id }, data: { lifecycleRules: null } });
+    return reply.status(204).send();
   });
 
   // 2. GET /s3/:bucket/* (GetObject)

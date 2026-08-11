@@ -93,6 +93,10 @@ GET|PUT|HEAD|POST|DELETE  /s3/<bucket>[/<key>][?query]
 | UploadPart | `PUT /s3/<bucket>/<key>?uploadId=<id>&partNumber=<n>` | write | returns `ETag` header |
 | CompleteMultipartUpload | `POST /s3/<bucket>/<key>?uploadId=<id>` | write | XML body `<CompleteMultipartUpload>`; returns XML result. Body capped at 1MB (413) — it's only a part list. Honors the same conditional-write headers as PutObject. |
 | AbortMultipartUpload | `DELETE /s3/<bucket>/<key>?uploadId=<id>` | write | `204` |
+| GetBucketLifecycle | `GET /s3/<bucket>?lifecycle` | read | XML `<LifecycleConfiguration>` of prefix rules (`<ID>`, `<Filter><Prefix>`, `<Status>`, `<Expiration>` `<Days>` or `<Date>`); `404 NoSuchLifecycleConfiguration` when none set. XML parsed by regex — no XML parser (no XXE). |
+| PutBucketLifecycle | `PUT /s3/<bucket>?lifecycle` | write | body is the `<LifecycleConfiguration>` XML (capped at 1MB, 413; `Content-MD5` verified when supplied); up to 1000 rules; `<Days>` (≥1) XOR `<Date>` (ISO calendar date); malformed/invalid XML → `400 MalformedXML`. |
+| DeleteBucketLifecycle | `DELETE /s3/<bucket>?lifecycle` | write | clears the configuration, `204` |
+| Bucket-level PUT/DELETE (other) | `PUT`/`DELETE /s3/<bucket>` | write | only the `?lifecycle` subresource is supported; anything else → `400 InvalidRequest` |
 
 ### 2.2 Response conventions
 
