@@ -192,6 +192,118 @@ export async function s3Routes(fastify: FastifyInstance) {
       return reply.status(403).type('application/xml').send(renderS3ErrorXml('AccessDenied', denied));
     }
 
+    // 3a. CopyObject — PUT with an x-amz-copy-source header clones the source
+    // object server-side (no payload). Read permission on the source is
+    // required too (the authenticated key must span both buckets).
+    const copySource = req.headers['x-amz-copy-source'] as string | undefined;
+    if (copySource) {
+      let srcBucket: string;
+      let srcKey: string;
+      try {
+        const decoded = decodeURIComponent(copySource.replace(/^\//, '').split('?')[0]);
+        const slash = decoded.indexOf('/');
+        if (slash <= 0 || slash === decoded.length - 1) throw new Error('malformed');
+        srcBucket = decoded.slice(0, slash);
+        srcKey = decoded.slice(slash + 1);
+      } catch {
+        return reply.status(400).type('application/xml').send(
+          renderS3ErrorXml('InvalidArgument', 'The x-amz-copy-source header is malformed.')
+        );
+      }
+
+      const srcBucketRec = await db.bucket.findUnique({ where: { name: srcBucket } });
+      if (!srcBucketRec) {
+        return reply.status(404).type('application/xml').send(renderS3ErrorXml('NoSuchBucket', 'The source bucket does not exist.'));
+      }
+      const srcObj = await db.object.findUnique({
+        where: { bucketName_key: { bucketName: srcBucket, key: srcKey } },
+      });
+      if (!srcObj) {
+        return reply.status(404).type('application/xml').send(renderS3ErrorXml('NoSuchKey', 'The specified copy source does not exist.'));
+      }
+
+      // Read on source: skip only when the source bucket is public (mirrors the
+      // anonymous GET path); otherwise the principal must be authorized.
+      if (!srcBucketRec.isPublic) {
+        const srcDenied = permissionDenied(auth, srcBucket, 'read');
+        if (srcDenied) {
+          return reply.status(403).type('application/xml').send(renderS3ErrorXml('AccessDenied', srcDenied));
+        }
+      }
+
+      const directive = (req.headers['x-amz-metadata-directive'] as string || 'COPY').trim().toUpperCase();
+      if (directive !== 'COPY' && directive !== 'REPLACE') {
+        return reply.status(400).type('application/xml').send(
+          renderS3ErrorXml('InvalidArgument', 'x-amz-metadata-directive must be COPY or REPLACE.')
+        );
+      }
+
+      // Copying an object onto itself only makes sense with REPLACE (metadata
+      // rewrite); AWS rejects the plain COPY form.
+      if (srcBucket === bucketName && srcKey === key && directive !== 'REPLACE') {
+        return reply.status(400).type('application/xml').send(
+          renderS3ErrorXml('InvalidRequest', 'This copy request is illegal because it is trying to copy an object to itself without changing the object\'s metadata, storage class, website redirect location or encryption attributes.')
+        );
+      }
+
+      const destObj = await db.object.findUnique({
+        where: { bucketName_key: { bucketName, key } },
+      });
+      // Conditional writes apply to the copy destination, as on a plain PUT.
+      const precondition = checkWritePreconditions(
+        req.headers as Record<string, unknown>,
+        destObj ? { etag: destObj.etag, updatedAt: destObj.updatedAt } : null,
+      );
+      if (precondition === 'precondition-failed') {
+        return reply.status(412).type('application/xml').send(renderS3ErrorXml('PreconditionFailed', 'At least one of the pre-conditions you specified did not hold'));
+      }
+      if (precondition === 'conflict') {
+        return reply.status(409).type('application/xml').send(renderS3ErrorXml('ConditionalRequestConflict', 'The conditional request cannot succeed because the object already exists'));
+      }
+      // A copy adds the source's size minus whatever it replaces at the dest.
+      const addedBytes = srcObj.size - (destObj?.size || 0);
+      if (addedBytes > 0 && (await wouldExceedQuota(addedBytes))) {
+        return reply.status(507).type('application/xml').send(
+          renderS3ErrorXml('InsufficientStorage', 'Storage quota exceeded. Delete objects or upgrade your plan to free up space.')
+        );
+      }
+
+      const destContentType =
+        directive === 'REPLACE'
+          ? (req.headers['content-type'] as string) || srcObj.contentType
+          : srcObj.contentType;
+      const storagePath = await storageEngine.copyObjectFile(srcObj.storagePath, bucketName, key);
+
+      await db.object.upsert({
+        where: { bucketName_key: { bucketName, key } },
+        create: {
+          bucketName,
+          key,
+          size: srcObj.size,
+          contentType: destContentType,
+          etag: srcObj.etag,
+          storagePath,
+        },
+        update: {
+          size: srcObj.size,
+          contentType: destContentType,
+          etag: srcObj.etag,
+          storagePath,
+          updatedAt: new Date(),
+        },
+      });
+
+      reply.header('Access-Control-Allow-Origin', bucket.corsOrigins || '*');
+      reply.header('Access-Control-Expose-Headers', 'ETag');
+      return reply.status(200).type('application/xml').send(
+        `<?xml version="1.0" encoding="UTF-8"?>
+<CopyObjectResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <ETag>${escapeXml(srcObj.etag)}</ETag>
+  <LastModified>${new Date().toISOString()}</LastModified>
+</CopyObjectResult>`
+      );
+    }
+
     const contentType = (req.headers['content-type'] as string) || mime.lookup(key) || 'application/octet-stream';
 
     // UploadPart (multipart)

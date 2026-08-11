@@ -209,6 +209,23 @@ export class StorageEngine {
     }
     return false;
   }
+
+  // Server-side copy: clones the source blob verbatim (including any encryption
+  // magic/IV/tag — a GCM blob is self-contained, so no decrypt/re-encrypt
+  // roundtrip is needed). The caller supplies size/etag from the source's DB
+  // row; the destination path is derived from the destination key like a PUT.
+  async copyObjectFile(srcPath: string, destBucket: string, destKey: string): Promise<string> {
+    const filePath = this.getFilePath(destBucket, destKey);
+    const tmpPath = filePath + '.tmp-' + process.pid + '-' + Date.now();
+    try {
+      await fs.promises.copyFile(srcPath, tmpPath);
+      await fs.promises.rename(tmpPath, filePath);
+    } catch (err) {
+      await fs.promises.unlink(tmpPath).catch(() => {});
+      throw err;
+    }
+    return filePath;
+  }
 }
 
 export const storageEngine = new StorageEngine();

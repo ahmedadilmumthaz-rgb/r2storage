@@ -38,7 +38,7 @@ platform/         Next.js SaaS control plane (signup, provisioning, metering, St
   lib/               provision.ts, nginx.ts, usage.ts, stripe.ts, session.ts, ...
 deploy/           baremetal nginx/systemd templates + SaaS VPS installer
 deploy.sh         parameterized baremetal installer (INSTANCE/PORT/BASE_DOMAIN)
-scripts/          smoke.sh (backend, 107 checks), platform-smoke.sh, sec-check.sh
+scripts/          smoke.sh (backend, 122 checks), platform-smoke.sh, sec-check.sh
 examples/         integration recipes (browser-upload, nextjs-uploader, laravel, ...)
 ```
 
@@ -47,7 +47,7 @@ examples/         integration recipes (browser-upload, nextjs-uploader, laravel,
 ```bash
 npm install --prefix backend && npm install --prefix frontend   # deps
 npm run build            # tsc backend + vite frontend
-npm test                 # scripts/smoke.sh — boots a throwaway backend, 107 checks
+npm test                 # scripts/smoke.sh — boots a throwaway backend, 122 checks
 npm run test:platform    # platform E2E smoke (needs a running platform first)
 npm run lint --prefix platform    # eslint (platform only; backend/frontend have no lint)
 bash scripts/sec-check.sh         # ad-hoc security spot-checks (spins a temp server)
@@ -139,6 +139,11 @@ proves the property (see the `auth hardening` section).
 - **Multipart uploads** go through `storageEngine` (`savePartFromStream` →
   `assembleUpload`), with DB rows in `MultipartUpload`/`MultipartPart`; abandoned
   uploads are swept by `maintenance.ts`.
+- **CopyObject** (`x-amz-copy-source`) is a server-side `fs.copyFile` in
+  `storageEngine.copyObjectFile` — the encrypted blob is self-contained
+  (magic+IV+ciphertext+tag), so a copy is byte-for-byte with no
+  decrypt/re-encrypt roundtrip. Requires read on the source + write on the
+  destination; same-bucket/key copies need `x-amz-metadata-directive: REPLACE`.
 - **Platform metering** polls `GET /api/admin/usage?since=` and
   `GET /api/admin/quota`; the container backend enforces the quota set via
   `PATCH /api/admin/quota`.

@@ -273,6 +273,32 @@ check "409 guard held (content unchanged)" "third" "$(curl -s "${AUTH_OPTS[@]}" 
 check "If-None-Match * on new key -> 200" "200" "$(status_of -X PUT "${AUTH_OPTS[@]}" -H 'If-None-Match: *' --data-binary 'new' "$B/s3/smoke/cond2.txt")"
 check "If-None-Match * on missing -> object created" "new" "$(curl -s "${AUTH_OPTS[@]}" "$B/s3/smoke/cond2.txt")"
 
+# --- server-side copy (CopyObject) -------------------------------------------------
+echo "== CopyObject =="
+# A second bucket + an unrestricted key exercise cross-bucket copies.
+curl -s -o /dev/null -b "$COOKIES" -X POST -H "Content-Type: application/json" -d '{"name":"smoke2"}' "$B/api/admin/buckets"
+RK=$(curl -s -b "$COOKIES" -X POST -H "Content-Type: application/json" -d '{"name":"full","permission":"FULL"}' "$B/api/admin/keys")
+RAK="$(json_field "$RK" accessKeyId)"
+RSK="$(json_field "$RK" secretAccessKey)"
+[ -n "$RAK" ] || { echo "✗ could not parse unrestricted key"; exit 1; }
+RCOPY_OPTS=(-H "x-access-key-id: $RAK" -H "x-access-key-secret: $RSK")
+check "CopyObject cross-bucket -> 200" "200" "$(status_of "${RCOPY_OPTS[@]}" -X PUT -H "x-amz-copy-source: /smoke/hello.txt" "$B/s3/smoke2/hi.txt")"
+check "copied content matches source" "smoke-test-content" "$(curl -s "${RCOPY_OPTS[@]}" "$B/s3/smoke2/hi.txt")"
+COPY_ETAG="$(curl -s -I "${RCOPY_OPTS[@]}" "$B/s3/smoke2/hi.txt" | grep -i '^etag:' | tr -d '\r' | cut -d' ' -f2)"
+check "copy preserves ETag (content identity)" "$ETAG" "$COPY_ETAG"
+check "PUT dest baseline" "200" "$(status_of "${RCOPY_OPTS[@]}" -X PUT --data-binary 'zzz' "$B/s3/smoke2/over.txt")"
+check "CopyObject overwrites existing dest" "200" "$(status_of "${RCOPY_OPTS[@]}" -X PUT -H "x-amz-copy-source: /smoke/hello.txt" "$B/s3/smoke2/over.txt")"
+check "overwritten dest has source content" "smoke-test-content" "$(curl -s "${RCOPY_OPTS[@]}" "$B/s3/smoke2/over.txt")"
+check "REPLACE directive copy -> 200" "200" "$(status_of "${RCOPY_OPTS[@]}" -X PUT -H "x-amz-copy-source: /smoke/hello.txt" -H "x-amz-metadata-directive: REPLACE" -H "Content-Type: text/custom" "$B/s3/smoke2/replaced.txt")"
+check "REPLACE directive sets Content-Type" "text/custom" "$(curl -s -D - -o /dev/null "${RCOPY_OPTS[@]}" "$B/s3/smoke2/replaced.txt" | grep -i '^content-type:' | tr -d '\r' | cut -d' ' -f2-)"
+check "self-copy without REPLACE -> 400" "400" "$(status_of "${RCOPY_OPTS[@]}" -X PUT -H "x-amz-copy-source: /smoke2/hi.txt" "$B/s3/smoke2/hi.txt")"
+check "self-copy with REPLACE -> 200" "200" "$(status_of "${RCOPY_OPTS[@]}" -X PUT -H "x-amz-copy-source: /smoke2/hi.txt" -H "x-amz-metadata-directive: REPLACE" "$B/s3/smoke2/hi.txt")"
+check "copy missing source object -> 404" "404" "$(status_of "${RCOPY_OPTS[@]}" -X PUT -H "x-amz-copy-source: /smoke/nope.txt" "$B/s3/smoke2/x.txt")"
+check "copy missing source bucket -> 404" "404" "$(status_of "${RCOPY_OPTS[@]}" -X PUT -H "x-amz-copy-source: /nobucket/x.txt" "$B/s3/smoke2/x.txt")"
+check "malformed copy-source -> 400" "400" "$(status_of "${RCOPY_OPTS[@]}" -X PUT -H "x-amz-copy-source: not-a-copy-source" "$B/s3/smoke2/x.txt")"
+check "scoped key cannot copy cross-bucket -> 403" "403" "$(status_of -X PUT "${AUTH_OPTS[@]}" -H "x-amz-copy-source: /smoke/hello.txt" "$B/s3/smoke2/denied.txt")"
+check "copy with If-None-Match: * on existing dest -> 409" "409" "$(status_of "${RCOPY_OPTS[@]}" -X PUT -H "x-amz-copy-source: /smoke/hello.txt" -H 'If-None-Match: *' "$B/s3/smoke2/hi.txt")"
+
 # --- multipart ------------------------------------------------------------------
 echo "== multipart upload =="
 R=$(curl -s -X POST -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" "$B/s3/smoke/big.bin?uploads")
