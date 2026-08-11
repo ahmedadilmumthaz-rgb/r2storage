@@ -52,8 +52,31 @@ function permissionDenied(auth: AuthResult, bucketName: string, required: 'read'
 
 export async function s3Routes(fastify: FastifyInstance) {
   // Catch-all S3 protocol handler under `/s3/:bucket/*` and `/s3/:bucket`
-  
-  // 1. GET /s3/:bucket (ListObjectsV2)
+
+  // HeadBucket (HEAD /s3/:bucket) — SDKs ping this before listing/uploading.
+  // Registered BEFORE the GET route so fastify's exposeHeadRoutes skips the
+  // auto-created HEAD (which would otherwise run the full list handler).
+  fastify.head('/s3/:bucket', async (req: FastifyRequest, reply: FastifyReply) => {
+    const { bucket: bucketName } = req.params as { bucket: string };
+    const bucket = await db.bucket.findUnique({ where: { name: bucketName } });
+    if (!bucket) {
+      return reply.status(404).type('application/xml').send(renderS3ErrorXml('NoSuchBucket', 'The specified bucket does not exist.'));
+    }
+    if (!bucket.isPublic) {
+      const query = req.query as Record<string, string>;
+      const auth = await S3Auth.authenticateRequest(req.headers, query, req.method, req.url);
+      if (!auth.authenticated) {
+        return reply.status(403).type('application/xml').send(renderS3ErrorXml('AccessDenied', auth.error || 'Access Denied'));
+      }
+      const denied = permissionDenied(auth, bucketName, 'read');
+      if (denied) {
+        return reply.status(403).type('application/xml').send(renderS3ErrorXml('AccessDenied', denied));
+      }
+    }
+    return reply.status(200).send();
+  });
+
+  // 1. GET /s3/:bucket (ListObjectsV2, GetBucketLocation, ListMultipartUploads)
   fastify.get('/s3/:bucket', async (req: FastifyRequest, reply: FastifyReply) => {
     const { bucket: bucketName } = req.params as { bucket: string };
     const query = req.query as Record<string, string>;
@@ -74,16 +97,121 @@ export async function s3Routes(fastify: FastifyInstance) {
       }
     }
 
+    // GetBucketLocation: SDKs (boto3, aws-sdk-v3) probe this on every client
+    // init. Single-region, so the constraint is always empty (us-east-1).
+    if (query['location'] !== undefined) {
+      return reply.status(200).type('application/xml').send(
+        `<?xml version="1.0" encoding="UTF-8"?>
+<LocationConstraint xmlns="http://s3.amazonaws.com/doc/2006-03-01/"></LocationConstraint>`
+      );
+    }
+
+    // ListMultipartUploads
+    if (query['uploads'] !== undefined) {
+      const uploads = await db.multipartUpload.findMany({
+        where: { bucketName },
+        orderBy: { createdAt: 'desc' },
+      });
+      const uploadXml = uploads
+        .map(
+          (u) => `
+    <Upload>
+      <Key>${escapeXml(u.key)}</Key>
+      <UploadId>${escapeXml(u.uploadId)}</UploadId>
+      <Initiator>
+        <ID>anon</ID>
+      </Initiator>
+      <Owner>
+        <ID>anon</ID>
+      </Owner>
+      <StorageClass>STANDARD</StorageClass>
+      <Initiated>${u.createdAt.toISOString()}</Initiated>
+    </Upload>`
+        )
+        .join('');
+      return reply.status(200).type('application/xml').send(
+        `<?xml version="1.0" encoding="UTF-8"?>
+<ListMultipartUploadsResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <Bucket>${escapeXml(bucketName)}</Bucket>
+  <KeyMarker></KeyMarker>
+  <UploadIdMarker></UploadIdMarker>
+  <NextKeyMarker></NextKeyMarker>
+  <NextUploadIdMarker></NextUploadIdMarker>
+  <MaxUploads>1000</MaxUploads>
+  <IsTruncated>false</IsTruncated>${uploadXml}
+</ListMultipartUploadsResult>`
+      );
+    }
+
+    // ListObjectsV2
     const prefix = query['prefix'] || '';
+    const delimiter = query['delimiter'] || '';
+    let maxKeys = parseInt(query['max-keys'] || '1000', 10);
+    if (!Number.isInteger(maxKeys) || maxKeys < 0) maxKeys = 1000;
+    maxKeys = Math.min(maxKeys, 1000);
+    const startAfter = query['start-after'] || '';
+    // The continuation token is the base64url of the last raw key consumed by
+    // the previous page; the client replays it as continuation-token and we
+    // simply resume past that key. Tokens are opaque, so a malformed one is an
+    // InvalidArgument.
+    let resumeAfter = startAfter;
+    const ct = query['continuation-token'];
+    if (ct !== undefined && ct !== '') {
+      // Buffer.from(base64url) is lenient and never throws, so reject tokens
+      // that don't round-trip to their own canonical encoding.
+      const decoded = Buffer.from(ct, 'base64url').toString('utf8');
+      if (Buffer.from(decoded).toString('base64url') !== ct) {
+        return reply.status(400).type('application/xml').send(renderS3ErrorXml('InvalidArgument', 'The continuation token provided is incorrect'));
+      }
+      resumeAfter = decoded;
+    }
+
     const objects = await db.object.findMany({
       where: {
         bucketName,
         ...(prefix ? { key: { startsWith: prefix } } : {}),
       },
-      take: 1000,
+      orderBy: { key: 'asc' },
     });
+    const keys = objects.map((o) => o.key).filter((k) => (resumeAfter ? k > resumeAfter : true));
 
-    const xml = renderListObjectsV2Xml(bucketName, prefix, objects);
+    // Fold keys past the first delimiter into CommonPrefixes (S3 folder
+    // semantics), keeping contents + prefixes in lexicographic order and
+    // honoring max-keys across both. The continuation token records the last
+    // raw key consumed so a folded prefix is never re-listed on resume.
+    type ListItem = { kind: 'content'; obj: (typeof objects)[number] } | { kind: 'prefix'; prefix: string };
+    const objByKey = new Map(objects.map((o) => [o.key, o]));
+    const items: ListItem[] = [];
+    let truncated = false;
+    let lastConsumed = '';
+    for (const key of keys) {
+      lastConsumed = key;
+      if (delimiter) {
+        const rest = key.slice(prefix.length);
+        const di = rest.indexOf(delimiter);
+        if (di !== -1) {
+          const cp = key.slice(0, prefix.length + di + delimiter.length);
+          const prev = items[items.length - 1];
+          if (prev && prev.kind === 'prefix' && prev.prefix === cp) continue;
+          if (items.length >= maxKeys) { truncated = true; break; }
+          items.push({ kind: 'prefix', prefix: cp });
+          continue;
+        }
+      }
+      if (items.length >= maxKeys) { truncated = true; break; }
+      items.push({ kind: 'content', obj: objByKey.get(key)! });
+    }
+    const token = truncated ? Buffer.from(lastConsumed).toString('base64url') : undefined;
+
+    const xml = renderListObjectsV2Xml(bucketName, {
+      prefix,
+      delimiter: delimiter || undefined,
+      startAfter: startAfter || undefined,
+      maxKeys,
+      isTruncated: truncated,
+      nextToken: token,
+      items,
+    });
     return reply.status(200).type('application/xml').send(xml);
   });
 
@@ -107,6 +235,51 @@ export async function s3Routes(fastify: FastifyInstance) {
       if (denied) {
         return reply.status(403).type('application/xml').send(renderS3ErrorXml('AccessDenied', denied));
       }
+    }
+
+    // ListParts: SDKs inspect an in-progress upload's parts before completing.
+    if (query['uploadId'] !== undefined) {
+      const upload = await db.multipartUpload.findUnique({ where: { uploadId: query['uploadId'] } });
+      if (!upload) {
+        return reply.status(404).type('application/xml').send(renderS3ErrorXml('NoSuchUpload', 'The specified upload does not exist.'));
+      }
+      let marker = parseInt(query['part-number-marker'] || '0', 10);
+      if (!Number.isInteger(marker) || marker < 0) marker = 0;
+      let maxParts = parseInt(query['max-parts'] || '1000', 10);
+      if (!Number.isInteger(maxParts) || maxParts < 0) maxParts = 1000;
+      maxParts = Math.min(maxParts, 1000);
+
+      const parts = await db.multipartPart.findMany({
+        where: { uploadId: query['uploadId'], partNumber: { gt: marker } },
+        orderBy: { partNumber: 'asc' },
+      });
+      const page = parts.slice(0, maxParts);
+      const isTruncated = parts.length > maxParts;
+      const partsXml = page
+        .map(
+          (p) => `
+    <Part>
+      <PartNumber>${p.partNumber}</PartNumber>
+      <LastModified>${p.createdAt.toISOString()}</LastModified>
+      <ETag>${p.etag}</ETag>
+      <Size>${p.size}</Size>
+    </Part>`
+        )
+        .join('');
+
+      return reply.status(200).type('application/xml').send(
+        `<?xml version="1.0" encoding="UTF-8"?>
+<ListPartsResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <Bucket>${escapeXml(bucketName)}</Bucket>
+  <Key>${escapeXml(key)}</Key>
+  <UploadId>${escapeXml(upload.uploadId)}</UploadId>
+  <StorageClass>STANDARD</StorageClass>
+  <PartNumberMarker>${marker}</PartNumberMarker>
+  <NextPartNumberMarker>${page.length ? page[page.length - 1].partNumber : 0}</NextPartNumberMarker>
+  <MaxParts>${maxParts}</MaxParts>
+  <IsTruncated>${isTruncated}</IsTruncated>${partsXml}
+</ListPartsResult>`
+      );
     }
 
     const obj = await db.object.findUnique({
@@ -695,27 +868,46 @@ export async function s3Routes(fastify: FastifyInstance) {
   });
 }
 
-function renderListObjectsV2Xml(bucketName: string, prefix: string, objects: any[]): string {
-  const contents = objects
+function renderListObjectsV2Xml(
+  bucketName: string,
+  opts: {
+    prefix: string;
+    delimiter?: string;
+    startAfter?: string;
+    maxKeys: number;
+    isTruncated: boolean;
+    nextToken?: string;
+    items: Array<{ kind: 'content'; obj: any } | { kind: 'prefix'; prefix: string }>;
+  }
+): string {
+  const contents = opts.items
+    .filter((i): i is { kind: 'content'; obj: any } => i.kind === 'content')
     .map(
-      (o) => `
+      (i) => `
     <Contents>
-      <Key>${escapeXml(o.key)}</Key>
-      <LastModified>${o.updatedAt.toISOString()}</LastModified>
-      <ETag>${o.etag}</ETag>
-      <Size>${o.size}</Size>
+      <Key>${escapeXml(i.obj.key)}</Key>
+      <LastModified>${i.obj.updatedAt.toISOString()}</LastModified>
+      <ETag>${i.obj.etag}</ETag>
+      <Size>${i.obj.size}</Size>
       <StorageClass>STANDARD</StorageClass>
     </Contents>`
     )
     .join('');
+  const commonPrefixes = opts.items
+    .filter((i): i is { kind: 'prefix'; prefix: string } => i.kind === 'prefix')
+    .map((i) => `  <CommonPrefixes>\n    <Prefix>${escapeXml(i.prefix)}</Prefix>\n  </CommonPrefixes>`)
+    .join('\n');
 
   return `<?xml version="1.0" encoding="UTF-8"?>
 <ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
   <Name>${escapeXml(bucketName)}</Name>
-  <Prefix>${escapeXml(prefix)}</Prefix>
-  <KeyCount>${objects.length}</KeyCount>
-  <MaxKeys>1000</MaxKeys>
-  <IsTruncated>false</IsTruncated>${contents}
+  <Prefix>${escapeXml(opts.prefix)}</Prefix>
+  ${opts.delimiter ? `<Delimiter>${escapeXml(opts.delimiter)}</Delimiter>` : ''}
+  ${opts.startAfter ? `<StartAfter>${escapeXml(opts.startAfter)}</StartAfter>` : ''}
+  <KeyCount>${opts.items.length}</KeyCount>
+  <MaxKeys>${opts.maxKeys}</MaxKeys>
+  <IsTruncated>${opts.isTruncated}</IsTruncated>
+  ${opts.nextToken ? `<NextContinuationToken>${escapeXml(opts.nextToken)}</NextContinuationToken>` : ''}${contents}${contents && commonPrefixes ? '\n' : ''}${commonPrefixes}
 </ListBucketResult>`;
 }
 

@@ -349,6 +349,31 @@ MPE="$(curl -s -D - -o /dev/null -X PUT "${AUTH_OPTS[@]}" --data-binary 'part1' 
 curl -s -o /dev/null -X POST "${AUTH_OPTS[@]}" -H "Content-Type: application/xml" --data "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>$MPE</ETag></Part></CompleteMultipartUpload>" "$B/s3/smoke/meta-mp.bin?uploadId=$METAUP_ID"
 check "multipart object carries initiate-time metadata" "1" "$(curl -s -D - -o /dev/null "${AUTH_OPTS[@]}" "$B/s3/smoke/meta-mp.bin" | grep -ci '^x-amz-meta-shard: 1')"
 
+# --- listing + subresources --------------------------------------------------------
+echo "== listing + subresources =="
+printf 'a' > "$TMP/a.txt"
+check "seed dir1/a.txt" "200" "$(status_of -X PUT "${AUTH_OPTS[@]}" --data-binary @"$TMP/a.txt" "$B/s3/smoke/dir1/a.txt")"
+check "seed dir1/b.txt" "200" "$(status_of -X PUT "${AUTH_OPTS[@]}" --data-binary @"$TMP/a.txt" "$B/s3/smoke/dir1/b.txt")"
+DLIST="$(curl -s "${AUTH_OPTS[@]}" "$B/s3/smoke?delimiter=/")"
+check "delimiter folds dir1/ into CommonPrefix" "1" "$(printf '%s' "$DLIST" | grep -c '<Prefix>dir1/</Prefix>')"
+check "delimiter hides folded keys" "0" "$(printf '%s' "$DLIST" | grep -c 'dir1/a.txt')"
+check "delimiter still lists other keys" "1" "$(printf '%s' "$DLIST" | grep -c '<Key>hello.txt</Key>')"
+PAGE1="$(curl -s "${AUTH_OPTS[@]}" "$B/s3/smoke?delimiter=/&max-keys=1")"
+check "max-keys=1 truncates" "true" "$(printf '%s' "$PAGE1" | sed -n 's:.*<IsTruncated>\([^<]*\)</IsTruncated>.*:\1:p')"
+CT="$(printf '%s' "$PAGE1" | sed -n 's:.*<NextContinuationToken>\([^<]*\)</NextContinuationToken>.*:\1:p')"
+[ -n "$CT" ] || { echo "✗ no continuation token"; exit 1; }
+PAGE2="$(curl -s "${AUTH_OPTS[@]}" "$B/s3/smoke?delimiter=/&continuation-token=$CT")"
+check "continuation token resumes past page 1" "1" "$(printf '%s' "$PAGE2" | grep -c '<Key>hello.txt</Key>')"
+check "resumed page not truncated" "false" "$(printf '%s' "$PAGE2" | sed -n 's:.*<IsTruncated>\([^<]*\)</IsTruncated>.*:\1:p')"
+SA="$(curl -s "${AUTH_OPTS[@]}" "$B/s3/smoke?start-after=dir1/b.txt")"
+check "start-after skips prior keys" "1" "$(printf '%s' "$SA" | grep -c '<Key>hello.txt</Key>')"
+check "start-after drops dir1/ prefix" "0" "$(printf '%s' "$SA" | grep -c '<Prefix>dir1/</Prefix>')"
+check "malformed continuation token -> 400" "400" "$(status_of "${AUTH_OPTS[@]}" "$B/s3/smoke?continuation-token=%25")"
+check "GetBucketLocation" "1" "$(curl -s "${AUTH_OPTS[@]}" "$B/s3/smoke?location" | grep -c '<LocationConstraint')"
+check "HeadBucket" "200" "$(status_of -I "${AUTH_OPTS[@]}" "$B/s3/smoke")"
+check "HeadBucket missing -> 404" "404" "$(status_of -I "${AUTH_OPTS[@]}" "$B/s3/no-such-bucket")"
+check "max-keys=0 returns empty list" "0" "$(curl -s "${AUTH_OPTS[@]}" "$B/s3/smoke?max-keys=0" | grep -c '<Key>')"
+
 # --- multipart ------------------------------------------------------------------
 echo "== multipart upload =="
 R=$(curl -s -X POST -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" "$B/s3/smoke/big.bin?uploads")
@@ -365,6 +390,14 @@ rm -f "$TMP/huge.xml"
 ETAG1="$(curl -s -D - -o /dev/null -X PUT -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" --data-binary 'part-one' "$B/s3/smoke/big.bin?partNumber=1&uploadId=$UPLOAD_ID" | grep -i '^etag:' | tr -d '\r' | cut -d' ' -f2)"
 ETAG2="$(curl -s -D - -o /dev/null -X PUT -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" --data-binary 'part-two' "$B/s3/smoke/big.bin?partNumber=2&uploadId=$UPLOAD_ID" | grep -i '^etag:' | tr -d '\r' | cut -d' ' -f2)"
 [ -n "$ETAG1" ] && [ -n "$ETAG2" ] || { echo "✗ missing part ETags"; exit 1; }
+
+# ListParts + ListMultipartUploads let SDKs inspect an upload before completing.
+LPXML="$(curl -s -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" "$B/s3/smoke/big.bin?uploadId=$UPLOAD_ID")"
+check "ListParts lists part 1" "1" "$(printf '%s' "$LPXML" | grep -c '<PartNumber>1</PartNumber>')"
+check "ListParts lists part 2 size" "8" "$(printf '%s' "$LPXML" | perl -0777 -ne 'if (/<PartNumber>2<\/PartNumber>.*?<Size>(\d+)<\/Size>/s) { print $1 }')"
+check "ListParts not truncated" "false" "$(printf '%s' "$LPXML" | sed -n 's:.*<IsTruncated>\([^<]*\)</IsTruncated>.*:\1:p')"
+check "ListParts unknown upload -> 404" "404" "$(status_of -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" "$B/s3/smoke/big.bin?uploadId=nope")"
+check "ListMultipartUploads shows in-progress upload" "1" "$(curl -s -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" "$B/s3/smoke?uploads" | grep -c "$UPLOAD_ID")"
 
 COMPLETE_XML="<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>$ETAG1</ETag></Part><Part><PartNumber>2</PartNumber><ETag>$ETAG2</ETag></Part></CompleteMultipartUpload>"
 curl -s -o /dev/null -X POST -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" -H "Content-Type: application/xml" --data "$COMPLETE_XML" "$B/s3/smoke/big.bin?uploadId=$UPLOAD_ID"
