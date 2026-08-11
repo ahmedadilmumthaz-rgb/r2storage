@@ -374,6 +374,21 @@ check "HeadBucket" "200" "$(status_of -I "${AUTH_OPTS[@]}" "$B/s3/smoke")"
 check "HeadBucket missing -> 404" "404" "$(status_of -I "${AUTH_OPTS[@]}" "$B/s3/no-such-bucket")"
 check "max-keys=0 returns empty list" "0" "$(curl -s "${AUTH_OPTS[@]}" "$B/s3/smoke?max-keys=0" | grep -c '<Key>')"
 
+# --- response overrides + read preconditions + Content-MD5 --------------------------
+echo "== response overrides + preconditions + Content-MD5 =="
+check "response-content-type override" "text/x-test" "$(curl -s -D - -o /dev/null "${AUTH_OPTS[@]}" "$B/s3/smoke/hello.txt?response-content-type=text%2Fx-test" | grep -i '^content-type:' | tr -d '\r' | cut -d' ' -f2-)"
+check "response-content-disposition override" "inline" "$(curl -s -D - -o /dev/null "${AUTH_OPTS[@]}" "$B/s3/smoke/hello.txt?response-content-disposition=inline" | grep -i '^content-disposition:' | tr -d '\r' | cut -d' ' -f2-)"
+check "response-cache-control override" "no-cache" "$(curl -s -D - -o /dev/null "${AUTH_OPTS[@]}" "$B/s3/smoke/hello.txt?response-cache-control=no-cache" | grep -i '^cache-control:' | tr -d '\r' | cut -d' ' -f2-)"
+HE_ETAG="$(curl -s -D - -o /dev/null "${AUTH_OPTS[@]}" "$B/s3/smoke/hello.txt" | grep -i '^etag:' | tr -d '\r' | cut -d' ' -f2)"
+check "If-Match wrong etag -> 412" "412" "$(status_of "${AUTH_OPTS[@]}" -H 'If-Match: "deadbeef"' "$B/s3/smoke/hello.txt")"
+check "If-Match correct etag -> 200" "200" "$(status_of "${AUTH_OPTS[@]}" -H "If-Match: $HE_ETAG" "$B/s3/smoke/hello.txt")"
+check "If-Unmodified-Since past -> 412" "412" "$(status_of "${AUTH_OPTS[@]}" -H 'If-Unmodified-Since: Sun, 01 Jan 2020 00:00:00 GMT' "$B/s3/smoke/hello.txt")"
+MD5OK="$(printf 'md5-check' | openssl dgst -md5 -binary | base64)"
+check "PUT with correct Content-MD5" "200" "$(status_of -X PUT "${AUTH_OPTS[@]}" -H "Content-MD5: $MD5OK" --data-binary 'md5-check' "$B/s3/smoke/md5check.txt")"
+check "PUT with wrong Content-MD5 -> 400" "400" "$(status_of -X PUT "${AUTH_OPTS[@]}" -H 'Content-MD5: QUJDRA==' --data-binary 'md5-check' "$B/s3/smoke/md5bad.txt")"
+check "rejected Content-MD5 object not stored" "404" "$(status_of "${AUTH_OPTS[@]}" "$B/s3/smoke/md5bad.txt")"
+check "PUT with malformed Content-MD5 -> 400" "400" "$(status_of -X PUT "${AUTH_OPTS[@]}" -H 'Content-MD5: not-base64!!' --data-binary 'md5-check' "$B/s3/smoke/md5bad2.txt")"
+
 # --- multipart ------------------------------------------------------------------
 echo "== multipart upload =="
 R=$(curl -s -X POST -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" "$B/s3/smoke/big.bin?uploads")

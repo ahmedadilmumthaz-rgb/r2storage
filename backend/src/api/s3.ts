@@ -6,7 +6,7 @@ import { wouldExceedQuota } from '../quota';
 import mime from 'mime-types';
 import crypto from 'crypto';
 import { Readable } from 'stream';
-import { parseRangeHeader, notModified, checkWritePreconditions } from './range';
+import { parseRangeHeader, notModified, readPreconditionFailed, checkWritePreconditions } from './range';
 import { extractMetadataFromHeaders, serializeMetadata, metadataHeaders } from './metadata';
 
 function bodyAsStream(body: unknown): NodeJS.ReadableStream {
@@ -32,6 +32,23 @@ function renderMultipartCompleteXml(bucketName: string, key: string, etag: strin
   <Key>${escapeXml(key)}</Key>
   <ETag>${escapeXml(etag)}</ETag>
 </CompleteMultipartUploadResult>`;
+}
+
+// Validate a request's Content-MD5 header against the md5 ETag the storage
+// engine just produced. Returns an S3 error XML to send, or null when the
+// digest matches (or no header was supplied).
+function contentMd5Mismatch(headers: Record<string, unknown>, etag: string): string | null {
+  const raw = (headers['content-md5'] as string | undefined)?.trim();
+  if (!raw) return null;
+  const supplied = Buffer.from(raw, 'base64');
+  if (supplied.length === 0 || supplied.toString('base64') !== raw) {
+    return renderS3ErrorXml('InvalidDigest', 'The Content-MD5 you specified is not valid.');
+  }
+  const computed = Buffer.from(etag.slice(1, -1), 'hex');
+  if (computed.length !== supplied.length || !crypto.timingSafeEqual(computed, supplied)) {
+    return renderS3ErrorXml('BadDigest', 'The Content-MD5 you specified did not match what we received.');
+  }
+  return null;
 }
 
 function permissionDenied(auth: AuthResult, bucketName: string, required: 'read' | 'write' | 'full'): string | null {
@@ -305,7 +322,25 @@ export async function s3Routes(fastify: FastifyInstance) {
     }
     reply.header('Accept-Ranges', 'bytes');
 
-    // Conditional GET: honor If-None-Match / If-Modified-Since (RFC 7232).
+    // Presigned-URL response overrides (response-content-type etc.): clients
+    // bake these into the query string of a presigned GET.
+    const overrides: Array<[string, string | undefined]> = [
+      ['content-type', query['response-content-type']],
+      ['content-disposition', query['response-content-disposition']],
+      ['content-encoding', query['response-content-encoding']],
+      ['content-language', query['response-content-language']],
+      ['cache-control', query['response-cache-control']],
+      ['expires', query['response-expires']],
+    ];
+    for (const [header, value] of overrides) {
+      if (value !== undefined) reply.header(header, value);
+    }
+
+    // Conditional GET: If-Match / If-Unmodified-Since fail with 412;
+    // If-None-Match / If-Modified-Since short-circuit with 304 (RFC 7232).
+    if (readPreconditionFailed(req.headers as Record<string, unknown>, obj.etag, obj.updatedAt)) {
+      return reply.status(412).type('application/xml').send(renderS3ErrorXml('PreconditionFailed', 'At least one of the pre-conditions you specified did not hold'));
+    }
     if (notModified(req.headers as Record<string, unknown>, obj.etag, obj.updatedAt)) {
       return reply.status(304).send();
     }
@@ -522,6 +557,13 @@ export async function s3Routes(fastify: FastifyInstance) {
 
     const part = await storageEngine.savePartFromStream(uploadId, partNumber, bodyAsStream(req.body));
 
+    // Content-MD5 integrity check on the part, same as PutObject.
+    const md5Error = contentMd5Mismatch(req.headers as Record<string, unknown>, part.etag);
+    if (md5Error) {
+      await storageEngine.deleteObjectFile(part.storagePath);
+      return reply.status(400).type('application/xml').send(md5Error);
+    }
+
       await db.multipartPart.upsert({
         where: { uploadId_partNumber: { uploadId, partNumber } },
         create: { uploadId, partNumber, etag: part.etag, size: part.size, storagePath: part.storagePath },
@@ -562,6 +604,15 @@ export async function s3Routes(fastify: FastifyInstance) {
     }
 
     const { size, etag, storagePath } = await storageEngine.saveObjectFromStream(bucketName, key, bodyAsStream(req.body));
+
+    // Content-MD5 integrity check: the ETag is the md5 of the payload, so a
+    // mismatching header means corrupted (or tampered) bytes in flight — reject
+    // and clean up the freshly written blob.
+    const md5Error = contentMd5Mismatch(req.headers as Record<string, unknown>, etag);
+    if (md5Error) {
+      await storageEngine.deleteObjectFile(storagePath);
+      return reply.status(400).type('application/xml').send(md5Error);
+    }
 
     // Authoritative post-write check (also covers requests without Content-Length).
     if (await wouldExceedQuota(size, existing?.size || 0)) {

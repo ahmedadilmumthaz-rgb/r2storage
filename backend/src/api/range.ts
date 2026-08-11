@@ -59,6 +59,30 @@ export function notModified(
   return false;
 }
 
+// Read-side 412 evaluation (RFC 7232 §3.1): If-Match / If-Unmodified-Since on
+// GET/HEAD. If-Match takes precedence over If-Unmodified-Since, mirroring the
+// write-side semantics in checkWritePreconditions.
+export function readPreconditionFailed(
+  headers: Record<string, unknown>,
+  etag: string,
+  lastModified: Date,
+): boolean {
+  const normalized = (tag: string) => tag.trim().replace(/^W\//, '').replace(/^"(.*)"$/, '$1');
+  const ifMatch = headers['if-match'];
+  if (typeof ifMatch === 'string' && ifMatch) {
+    if (ifMatch.trim() === '*') return false;
+    const et = normalized(etag);
+    return !ifMatch.split(',').some((tag) => normalized(tag) === et);
+  }
+  const ifUnmodified = headers['if-unmodified-since'];
+  if (typeof ifUnmodified === 'string' && ifUnmodified) {
+    const since = Date.parse(ifUnmodified);
+    if (Number.isNaN(since)) return false;
+    return Math.floor(lastModified.getTime() / 1000) > Math.floor(since / 1000);
+  }
+  return false;
+}
+
 // Write-precondition evaluation (conditional writes). Mirrors S3's PutObject
 // semantics: If-Match and If-Unmodified-Since fail with 412 PreconditionFailed
 // when the current object doesn't match, and If-None-Match: * fails with
