@@ -170,17 +170,76 @@ export async function s3Routes(fastify: FastifyInstance) {
       );
     }
 
-    // ListMultipartUploads
+    // ListMultipartUploads — in-progress uploads for the bucket, paginated the
+    // same way ListObjects is: resume after key-marker (+upload-id-marker),
+    // cap with max-uploads, fold shared prefixes with delimiter. Uploads are
+    // ordered by (key, uploadId) so both markers resume deterministically;
+    // upload-id-marker is ignored without key-marker, matching AWS.
     if (query['uploads'] !== undefined) {
+      const prefix = query['prefix'] || '';
+      const delimiter = query['delimiter'] || '';
+      const encodingType = (query['encoding-type'] || '').toLowerCase() === 'url' ? 'url' : '';
+      const enc = (v: string) => (encodingType ? escapeXml(encodeURIComponent(v)) : escapeXml(v));
+      let maxUploads = parseInt(query['max-uploads'] || '1000', 10);
+      if (!Number.isInteger(maxUploads) || maxUploads < 0) maxUploads = 1000;
+      maxUploads = Math.min(maxUploads, 1000);
+      const keyMarker = query['key-marker'] || '';
+      const uploadIdMarker = query['upload-id-marker'] || '';
+
       const uploads = await db.multipartUpload.findMany({
-        where: { bucketName },
-        orderBy: { createdAt: 'desc' },
+        where: {
+          bucketName,
+          ...(prefix ? { key: { startsWith: prefix } } : {}),
+        },
+        orderBy: [{ key: 'asc' }, { uploadId: 'asc' }],
       });
-      const uploadXml = uploads
-        .map(
-          (u) => `
+
+      type UploadItem =
+        | { kind: 'upload'; upload: (typeof uploads)[number] }
+        | { kind: 'prefix'; prefix: string };
+      const items: UploadItem[] = [];
+      let truncated = false;
+      for (const upload of uploads) {
+        if (keyMarker) {
+          // Resume strictly after (keyMarker, uploadIdMarker). A bare key-marker
+          // skips the whole marker key (only lexicographically greater keys are
+          // listed); with an upload-id-marker, that key's uploads resume too.
+          if (upload.key < keyMarker) continue;
+          if (upload.key === keyMarker) {
+            if (!uploadIdMarker || upload.uploadId <= uploadIdMarker) continue;
+          }
+        }
+        if (delimiter) {
+          const rest = upload.key.slice(prefix.length);
+          const di = rest.indexOf(delimiter);
+          if (di !== -1) {
+            const cp = upload.key.slice(0, prefix.length + di + delimiter.length);
+            const prev = items[items.length - 1];
+            if (prev && prev.kind === 'prefix' && prev.prefix === cp) continue;
+            if (items.length >= maxUploads) { truncated = true; break; }
+            items.push({ kind: 'prefix', prefix: cp });
+            continue;
+          }
+        }
+        if (items.length >= maxUploads) { truncated = true; break; }
+        items.push({ kind: 'upload', upload });
+      }
+
+      // The next markers echo the last item consumed, so a page that ended on a
+      // CommonPrefix resumes past the whole prefix with key-marker=<prefix>.
+      const last = items[items.length - 1];
+      const nextKeyMarker = truncated && last ? (last.kind === 'upload' ? last.upload.key : last.prefix) : '';
+      const nextUploadIdMarker = truncated && last && last.kind === 'upload' ? last.upload.uploadId : '';
+
+      const uploadXml = items
+        .map((item) => {
+          if (item.kind === 'prefix') {
+            return `  <CommonPrefixes>\n    <Prefix>${enc(item.prefix)}</Prefix>\n  </CommonPrefixes>`;
+          }
+          const u = item.upload;
+          return `
     <Upload>
-      <Key>${escapeXml(u.key)}</Key>
+      <Key>${enc(u.key)}</Key>
       <UploadId>${escapeXml(u.uploadId)}</UploadId>
       <Initiator>
         <ID>anon</ID>
@@ -190,19 +249,21 @@ export async function s3Routes(fastify: FastifyInstance) {
       </Owner>
       <StorageClass>STANDARD</StorageClass>
       <Initiated>${u.createdAt.toISOString()}</Initiated>
-    </Upload>`
-        )
-        .join('');
+    </Upload>`;
+        })
+        .join('\n');
+
       return reply.status(200).type('application/xml').send(
         `<?xml version="1.0" encoding="UTF-8"?>
 <ListMultipartUploadsResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
   <Bucket>${escapeXml(bucketName)}</Bucket>
-  <KeyMarker></KeyMarker>
-  <UploadIdMarker></UploadIdMarker>
-  <NextKeyMarker></NextKeyMarker>
-  <NextUploadIdMarker></NextUploadIdMarker>
-  <MaxUploads>1000</MaxUploads>
-  <IsTruncated>false</IsTruncated>${uploadXml}
+  <KeyMarker>${enc(keyMarker)}</KeyMarker>
+  <UploadIdMarker>${escapeXml(uploadIdMarker)}</UploadIdMarker>
+  <NextKeyMarker>${enc(nextKeyMarker)}</NextKeyMarker>
+  <NextUploadIdMarker>${escapeXml(nextUploadIdMarker)}</NextUploadIdMarker>
+  <MaxUploads>${maxUploads}</MaxUploads>
+  <IsTruncated>${truncated}</IsTruncated>
+  <Prefix>${enc(prefix)}</Prefix>${delimiter ? `\n  <Delimiter>${enc(delimiter)}</Delimiter>` : ''}${encodingType ? `\n  <EncodingType>url</EncodingType>` : ''}${uploadXml}
 </ListMultipartUploadsResult>`
       );
     }
@@ -546,9 +607,11 @@ export async function s3Routes(fastify: FastifyInstance) {
     }
 
     // ListParts: SDKs inspect an in-progress upload's parts before completing.
+    // The uploadId must belong to this bucket and key, like S3 (a stray id for
+    // another object is NoSuchUpload, not a listing of that object's parts).
     if (query['uploadId'] !== undefined) {
       const upload = await db.multipartUpload.findUnique({ where: { uploadId: query['uploadId'] } });
-      if (!upload) {
+      if (!upload || upload.bucketName !== bucketName || upload.key !== key) {
         return reply.status(404).type('application/xml').send(renderS3ErrorXml('NoSuchUpload', 'The specified upload does not exist.'));
       }
       let marker = parseInt(query['part-number-marker'] || '0', 10);

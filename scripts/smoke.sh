@@ -509,7 +509,45 @@ check "ListParts lists part 1" "1" "$(printf '%s' "$LPXML" | grep -c '<PartNumbe
 check "ListParts lists part 2 size" "8" "$(printf '%s' "$LPXML" | perl -0777 -ne 'if (/<PartNumber>2<\/PartNumber>.*?<Size>(\d+)<\/Size>/s) { print $1 }')"
 check "ListParts not truncated" "false" "$(printf '%s' "$LPXML" | sed -n 's:.*<IsTruncated>\([^<]*\)</IsTruncated>.*:\1:p')"
 check "ListParts unknown upload -> 404" "404" "$(status_of -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" "$B/s3/smoke/big.bin?uploadId=nope")"
+check "ListParts wrong key for upload -> 404" "404" "$(status_of -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" "$B/s3/smoke/other.bin?uploadId=$UPLOAD_ID")"
 check "ListMultipartUploads shows in-progress upload" "1" "$(curl -s -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" "$B/s3/smoke?uploads" | grep -c "$UPLOAD_ID")"
+check "ListParts max-parts truncates" "true" "$(curl -s -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" "$B/s3/smoke/big.bin?uploadId=$UPLOAD_ID&max-parts=1" | sed -n 's:.*<IsTruncated>\([^<]*\)</IsTruncated>.*:\1:p')"
+check "ListParts part-number-marker resumes" "1" "$(curl -s -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" "$B/s3/smoke/big.bin?uploadId=$UPLOAD_ID&part-number-marker=1" | grep -c '<PartNumber>2</PartNumber>')"
+check "ListParts marker excludes earlier part" "0" "$(curl -s -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" "$B/s3/smoke/big.bin?uploadId=$UPLOAD_ID&part-number-marker=1" | grep -c '<PartNumber>1</PartNumber>')"
+
+# ListMultipartUploads pagination + filtering (SDKs page in-progress uploads).
+# Seed five uploads: two paginated keys, two sharing one key (upload-id-marker
+# resume), and a key with a space (encoding-type=url).
+PAG_A="$(printf '%s' "$(curl -s -X POST -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" "$B/s3/smoke/pag/2026/a.bin?uploads")" | sed -n 's:.*<UploadId>\([^<]*\)</UploadId>.*:\1:p')"
+PAG_B="$(printf '%s' "$(curl -s -X POST -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" "$B/s3/smoke/pag/2027/b.bin?uploads")" | sed -n 's:.*<UploadId>\([^<]*\)</UploadId>.*:\1:p')"
+DUP1="$(printf '%s' "$(curl -s -X POST -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" "$B/s3/smoke/dup.bin?uploads")" | sed -n 's:.*<UploadId>\([^<]*\)</UploadId>.*:\1:p')"
+DUP2="$(printf '%s' "$(curl -s -X POST -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" "$B/s3/smoke/dup.bin?uploads")" | sed -n 's:.*<UploadId>\([^<]*\)</UploadId>.*:\1:p')"
+SPACE_ID="$(printf '%s' "$(curl -s -X POST -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" "$B/s3/smoke/space%20key.bin?uploads")" | sed -n 's:.*<UploadId>\([^<]*\)</UploadId>.*:\1:p')"
+[ -n "$PAG_A" ] && [ -n "$PAG_B" ] && [ -n "$DUP1" ] && [ -n "$DUP2" ] && [ -n "$SPACE_ID" ] || { echo "✗ no pagination UploadIds"; exit 1; }
+
+check "uploads prefix filters keys" "1" "$(curl -s -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" "$B/s3/smoke?uploads&prefix=pag/" | grep -c '<Key>pag/2026/a.bin</Key>')"
+check "uploads prefix excludes others" "0" "$(curl -s -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" "$B/s3/smoke?uploads&prefix=pag/" | grep -c '<Key>dup.bin</Key>')"
+check "uploads delimiter folds CommonPrefixes" "2" "$(curl -s -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" "$B/s3/smoke?uploads&prefix=pag/&delimiter=/" | grep -c '<CommonPrefixes>')"
+check "uploads delimiter folds the right prefixes" "1" "$(curl -s -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" "$B/s3/smoke?uploads&prefix=pag/&delimiter=/" | grep -c '<Prefix>pag/2027/</Prefix>')"
+check "uploads max-uploads truncates" "true" "$(curl -s -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" "$B/s3/smoke?uploads&prefix=pag/&max-uploads=1" | sed -n 's:.*<IsTruncated>\([^<]*\)</IsTruncated>.*:\1:p')"
+check "uploads NextUploadIdMarker echoes last" "$PAG_A" "$(curl -s -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" "$B/s3/smoke?uploads&prefix=pag/&max-uploads=1" | sed -n 's:.*<NextUploadIdMarker>\([^<]*\)</NextUploadIdMarker>.*:\1:p')"
+check "uploads key-marker skips marker key" "0" "$(curl -s -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" "$B/s3/smoke?uploads&prefix=pag/&key-marker=pag/2026/a.bin" | grep -c '<Key>pag/2026/a.bin</Key>')"
+check "uploads key-marker returns later key" "1" "$(curl -s -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" "$B/s3/smoke?uploads&prefix=pag/&key-marker=pag/2026/a.bin" | grep -c '<Key>pag/2027/b.bin</Key>')"
+DUP_IDS="$(curl -s -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" "$B/s3/smoke?uploads&prefix=dup.bin" | sed -n 's:.*<UploadId>\([^<]*\)</UploadId>.*:\1:p' | sort)"
+DUP_LOW="$(printf '%s\n' "$DUP_IDS" | head -1)"
+DUP_HIGH="$(printf '%s\n' "$DUP_IDS" | tail -1)"
+check "uploads upload-id-marker resumes within key" "$DUP_HIGH" "$(curl -s -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" "$B/s3/smoke?uploads&prefix=dup.bin&key-marker=dup.bin&upload-id-marker=$DUP_LOW" | sed -n 's:.*<UploadId>\([^<]*\)</UploadId>.*:\1:p')"
+check "uploads bare key-marker skips whole key" "0" "$(curl -s -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" "$B/s3/smoke?uploads&prefix=dup.bin&key-marker=dup.bin" | grep -c '<Key>dup.bin</Key>')"
+check "uploads encoding-type=url encodes keys" "1" "$(curl -s -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" "$B/s3/smoke?uploads&encoding-type=url" | grep -c '<Key>space%20key.bin</Key>')"
+check "uploads encoding-type=url announced" "1" "$(curl -s -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" "$B/s3/smoke?uploads&encoding-type=url" | grep -c '<EncodingType>url</EncodingType>')"
+check "uploads raw key without encoding-type" "1" "$(curl -s -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" "$B/s3/smoke?uploads" | grep -c '<Key>space key.bin</Key>')"
+
+check "abort seeded upload A" "204" "$(status_of -X DELETE -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" "$B/s3/smoke/pag/2026/a.bin?uploadId=$PAG_A")"
+check "abort seeded upload B" "204" "$(status_of -X DELETE -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" "$B/s3/smoke/pag/2027/b.bin?uploadId=$PAG_B")"
+check "abort seeded upload DUP1" "204" "$(status_of -X DELETE -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" "$B/s3/smoke/dup.bin?uploadId=$DUP1")"
+check "abort seeded upload DUP2" "204" "$(status_of -X DELETE -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" "$B/s3/smoke/dup.bin?uploadId=$DUP2")"
+check "abort seeded space-key upload" "204" "$(status_of -X DELETE -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" "$B/s3/smoke/space%20key.bin?uploadId=$SPACE_ID")"
+check "seeded uploads cleaned up" "0" "$(curl -s -H "x-access-key-id: $AK" -H "x-access-key-secret: $SK" "$B/s3/smoke?uploads&prefix=pag/" | grep -c '<Upload>')"
 
 # UploadPart checksum integrity (part 3 is uploaded but never completed, so the
 # assembled big.bin stays part-one+part-two).
