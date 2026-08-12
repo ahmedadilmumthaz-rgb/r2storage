@@ -22,12 +22,40 @@ import {
   deserializeLifecycleRules,
   renderLifecycleXml,
 } from './lifecycle';
+import {
+  parseCorsXml,
+  serializeCorsRules,
+  deserializeCorsRules,
+  renderCorsXml,
+  corsHeadersForRequest,
+} from './cors';
 
 function bodyAsStream(body: unknown): NodeJS.ReadableStream {
   if (body && typeof (body as any).pipe === 'function') {
     return body as NodeJS.ReadableStream;
   }
   return Readable.from((body as Buffer) || Buffer.alloc(0));
+}
+
+// Bucket-level CORS on object routes. When the bucket carries explicit CORS
+// rules (PutBucketCors), the request's Origin is matched against them and the
+// Access-Control-* headers follow; otherwise the admin-set corsOrigins string
+// (default `*`) is sent verbatim, preserving the legacy behavior.
+function applyCorsHeaders(
+  reply: FastifyReply,
+  bucket: { corsRules: string | null; corsOrigins: string },
+  req: FastifyRequest
+) {
+  const rules = deserializeCorsRules(bucket.corsRules);
+  if (rules.length > 0) {
+    const origin = (req.headers.origin as string | undefined) || '';
+    const headers = corsHeadersForRequest(rules, origin, {});
+    for (const [name, value] of Object.entries(headers)) {
+      reply.header(name, value);
+    }
+    return;
+  }
+  reply.header('Access-Control-Allow-Origin', bucket.corsOrigins || '*');
 }
 
 function renderMultipartInitXml(bucketName: string, key: string, uploadId: string): string {
@@ -326,10 +354,16 @@ export async function s3Routes(fastify: FastifyInstance) {
   </AccessControlList>
 </AccessControlPolicy>`
           );
-        case 'cors':
+        case 'cors': {
+          const rules = deserializeCorsRules(bucket.corsRules);
+          if (rules.length > 0) {
+            return reply.status(200).type('application/xml').send(renderCorsXml(rules));
+          }
           if (!bucket.corsOrigins) {
             return reply.status(404).type('application/xml').send(renderS3ErrorXml('NoSuchCORSConfiguration', 'The CORS configuration does not exist.'));
           }
+          // Legacy buckets configured via the admin API carry a single origin
+          // string; render it as the equivalent single-rule config.
           return reply.status(200).type('application/xml').send(
             `<?xml version="1.0" encoding="UTF-8"?>
 <CORSConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
@@ -344,13 +378,11 @@ export async function s3Routes(fastify: FastifyInstance) {
   </CORSRule>
 </CORSConfiguration>`
           );
+        }
         case 'policy':
           return reply.status(404).type('application/xml').send(renderS3ErrorXml('NoSuchBucketPolicy', 'The bucket policy does not exist.'));
         case 'tagging':
-          return reply.status(200).type('application/xml').send(
-            `<?xml version="1.0" encoding="UTF-8"?>
-<Tagging xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><TagSet/></Tagging>`
-          );
+          return reply.status(200).type('application/xml').send(renderTaggingXml(deserializeTags(bucket.tags)));
         case 'lifecycle': {
           const rules = deserializeLifecycleRules(bucket.lifecycleRules);
           if (rules.length === 0) {
@@ -470,8 +502,9 @@ export async function s3Routes(fastify: FastifyInstance) {
     return reply.status(200).type('application/xml').send(xml);
   });
 
-  // 1b. PUT /s3/:bucket (PutBucketLifecycle). Bucket-level PUTs only support
-  // the ?lifecycle subresource; anything else is InvalidRequest.
+  // 1b. PUT /s3/:bucket (PutBucketLifecycle / PutBucketCors / PutBucketTagging).
+  // Bucket-level PUTs only support these three subresources; anything else is
+  // InvalidRequest.
   fastify.put('/s3/:bucket', async (req: FastifyRequest, reply: FastifyReply) => {
     const { bucket: bucketName } = req.params as { bucket: string };
     const query = req.query as Record<string, string>;
@@ -490,9 +523,10 @@ export async function s3Routes(fastify: FastifyInstance) {
       return reply.status(403).type('application/xml').send(renderS3ErrorXml('AccessDenied', denied));
     }
 
-    if (query['lifecycle'] === undefined) {
+    const subresource = (['lifecycle', 'cors', 'tagging'] as const).find((s) => query[s] !== undefined);
+    if (!subresource) {
       return reply.status(400).type('application/xml').send(
-        renderS3ErrorXml('InvalidRequest', 'Bucket-level PUT only supports the lifecycle subresource.')
+        renderS3ErrorXml('InvalidRequest', 'Bucket-level PUT only supports the lifecycle, cors, and tagging subresources.')
       );
     }
 
@@ -501,7 +535,7 @@ export async function s3Routes(fastify: FastifyInstance) {
       body = await streamToString(bodyAsStream(req.body), MAX_COMPLETE_XML_BYTES);
     } catch {
       return reply.status(413).type('application/xml').send(
-        renderS3ErrorXml('EntityTooLarge', 'The PutBucketLifecycle body exceeds the 1MB limit.')
+        renderS3ErrorXml('EntityTooLarge', 'The bucket configuration body exceeds the 1MB limit.')
       );
     }
 
@@ -523,25 +557,53 @@ export async function s3Routes(fastify: FastifyInstance) {
       }
     }
 
-    const rules = parseLifecycleXml(body);
-    if (!rules) {
+    if (subresource === 'lifecycle') {
+      const rules = parseLifecycleXml(body);
+      if (!rules) {
+        return reply.status(400).type('application/xml').send(
+          renderS3ErrorXml('MalformedXML', 'The XML you provided was not well-formed or did not validate against our published schema.')
+        );
+      }
+      await db.bucket.update({
+        where: { id: bucket.id },
+        data: { lifecycleRules: serializeLifecycleRules(rules) },
+      });
+      return reply.status(200).type('application/xml').send(
+        `<?xml version="1.0" encoding="UTF-8"?><LifecycleConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"/>`
+      );
+    }
+
+    if (subresource === 'cors') {
+      const rules = parseCorsXml(body);
+      if (!rules) {
+        return reply.status(400).type('application/xml').send(
+          renderS3ErrorXml('MalformedXML', 'The XML you provided was not well-formed or did not validate against our published schema.')
+        );
+      }
+      await db.bucket.update({
+        where: { id: bucket.id },
+        data: { corsRules: serializeCorsRules(rules) },
+      });
+      applyCorsHeaders(reply, bucket, req);
+      return reply.status(200).send();
+    }
+
+    const tags = parseTaggingXml(body);
+    if (!tags) {
       return reply.status(400).type('application/xml').send(
         renderS3ErrorXml('MalformedXML', 'The XML you provided was not well-formed or did not validate against our published schema.')
       );
     }
-
     await db.bucket.update({
       where: { id: bucket.id },
-      data: { lifecycleRules: serializeLifecycleRules(rules) },
+      data: { tags: serializeTags(tags) },
     });
-
-    reply.header('Access-Control-Allow-Origin', bucket.corsOrigins || '*');
-    return reply.status(200).type('application/xml').send(
-      `<?xml version="1.0" encoding="UTF-8"?><LifecycleConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"/>`
-    );
+    applyCorsHeaders(reply, bucket, req);
+    return reply.status(200).send();
   });
 
-  // 1c. DELETE /s3/:bucket (DeleteBucketLifecycle).
+  // 1c. DELETE /s3/:bucket (DeleteBucketLifecycle / DeleteBucketCors /
+  // DeleteBucketTagging).
   fastify.delete('/s3/:bucket', async (req: FastifyRequest, reply: FastifyReply) => {
     const { bucket: bucketName } = req.params as { bucket: string };
     const query = req.query as Record<string, string>;
@@ -560,13 +622,20 @@ export async function s3Routes(fastify: FastifyInstance) {
       return reply.status(403).type('application/xml').send(renderS3ErrorXml('AccessDenied', denied));
     }
 
-    if (query['lifecycle'] === undefined) {
+    const subresource = (['lifecycle', 'cors', 'tagging'] as const).find((s) => query[s] !== undefined);
+    if (!subresource) {
       return reply.status(400).type('application/xml').send(
-        renderS3ErrorXml('InvalidRequest', 'Bucket-level DELETE only supports the lifecycle subresource.')
+        renderS3ErrorXml('InvalidRequest', 'Bucket-level DELETE only supports the lifecycle, cors, and tagging subresources.')
       );
     }
 
-    await db.bucket.update({ where: { id: bucket.id }, data: { lifecycleRules: null } });
+    if (subresource === 'lifecycle') {
+      await db.bucket.update({ where: { id: bucket.id }, data: { lifecycleRules: null } });
+    } else if (subresource === 'cors') {
+      await db.bucket.update({ where: { id: bucket.id }, data: { corsRules: null } });
+    } else {
+      await db.bucket.update({ where: { id: bucket.id }, data: { tags: null } });
+    }
     return reply.status(204).send();
   });
 
@@ -691,8 +760,8 @@ export async function s3Routes(fastify: FastifyInstance) {
       return reply.status(404).type('application/xml').send(renderS3ErrorXml('NoSuchKey', 'The specified key does not exist.'));
     }
 
-    // Set CORS headers
-    reply.header('Access-Control-Allow-Origin', bucket.corsOrigins || '*');
+    // Set CORS headers (matched against PutBucketCors rules when configured)
+    applyCorsHeaders(reply, bucket, req);
     reply.header('Content-Type', obj.contentType);
     reply.header('ETag', obj.etag);
     // Object metadata (x-amz-meta-*, Content-Disposition/Encoding/Cache-Control)
@@ -953,7 +1022,7 @@ export async function s3Routes(fastify: FastifyInstance) {
           update: { etag: part.etag, size: part.size, storagePath: part.storagePath, createdAt: new Date() },
         });
 
-        reply.header('Access-Control-Allow-Origin', bucket.corsOrigins || '*');
+        applyCorsHeaders(reply, bucket, req);
         reply.header('Access-Control-Expose-Headers', 'ETag');
         return reply.status(200).type('application/xml').send(
           `<?xml version="1.0" encoding="UTF-8"?>
@@ -1057,7 +1126,7 @@ export async function s3Routes(fastify: FastifyInstance) {
         },
       });
 
-      reply.header('Access-Control-Allow-Origin', bucket.corsOrigins || '*');
+      applyCorsHeaders(reply, bucket, req);
       reply.header('Access-Control-Expose-Headers', 'ETag');
       return reply.status(200).type('application/xml').send(
         `<?xml version="1.0" encoding="UTF-8"?>
@@ -1115,7 +1184,7 @@ export async function s3Routes(fastify: FastifyInstance) {
         update: { etag: part.etag, size: part.size, storagePath: part.storagePath, createdAt: new Date() },
       });
 
-      reply.header('Access-Control-Allow-Origin', bucket.corsOrigins || '*');
+      applyCorsHeaders(reply, bucket, req);
       reply.header('ETag', part.etag);
       return reply.status(200).send();
     }
@@ -1214,7 +1283,7 @@ export async function s3Routes(fastify: FastifyInstance) {
       },
     });
 
-    reply.header('Access-Control-Allow-Origin', bucket.corsOrigins || '*');
+    applyCorsHeaders(reply, bucket, req);
     reply.header('ETag', etag);
     return reply.status(200).send();
   });
@@ -1511,9 +1580,38 @@ export async function s3Routes(fastify: FastifyInstance) {
     }
     xml += `</DeleteResult>`;
 
-    reply.header('Access-Control-Allow-Origin', bucket.corsOrigins || '*');
+    applyCorsHeaders(reply, bucket, req);
     return reply.status(200).type('application/xml').send(xml);
   });
+
+  // 5. OPTIONS /s3/:bucket and /s3/:bucket/* — CORS preflight for browser
+  // clients (e.g. presigned PUT uploads from the browser-upload example).
+  // Answered purely from the bucket's CORS rules with no auth: the browser
+  // cannot sign a preflight, and the follow-up request carries credentials.
+  // A disallowed origin gets 403 AccessForbidden, like S3.
+  fastify.options('/s3/:bucket/*', preflightHandler);
+  fastify.options('/s3/:bucket', preflightHandler);
+}
+
+async function preflightHandler(req: FastifyRequest, reply: FastifyReply) {
+  const { bucket: bucketName } = req.params as { bucket: string };
+  const bucket = await db.bucket.findUnique({ where: { name: bucketName } });
+  if (!bucket) return reply.status(403).type('application/xml').send(renderS3ErrorXml('AccessForbidden', 'CORS is not enabled for this bucket.'));
+
+  const rules = deserializeCorsRules(bucket.corsRules);
+  const origin = (req.headers.origin as string | undefined) || '';
+  const requestMethod = (req.headers['access-control-request-method'] as string | undefined) || '';
+  const requestHeaders = ((req.headers['access-control-request-headers'] as string | undefined) || '')
+    .split(/,\s*/)
+    .filter(Boolean);
+  const headers = corsHeadersForRequest(rules, origin, { preflight: true, requestMethod, requestHeaders });
+  if (Object.keys(headers).length === 0) {
+    return reply.status(403).type('application/xml').send(renderS3ErrorXml('AccessForbidden', 'CORS is not enabled for this origin.'));
+  }
+  for (const [name, value] of Object.entries(headers)) {
+    reply.header(name, value);
+  }
+  return reply.status(200).send();
 }
 
 // Shared listing body: Contents entries + CommonPrefixes. `enc` applies the

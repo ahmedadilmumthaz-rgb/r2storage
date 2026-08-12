@@ -4,6 +4,7 @@ import { storageEngine } from '../storage/engine';
 import { CONFIG } from '../config';
 import { parseRangeHeader, notModified } from './range';
 import { metadataHeaders } from './metadata';
+import { deserializeCorsRules, corsHeadersForRequest } from './cors';
 
 /**
  * Resolves a request for a public custom-domain URL and streams the object.
@@ -73,6 +74,15 @@ export async function tryServePublicObject(
   }
 
   reply.header('Access-Control-Allow-Origin', bucket.corsOrigins || '*');
+  // Explicit PutBucketCors rules override the admin-set single origin: the
+  // request Origin is matched and the allowed-origin header echoed if allowed.
+  const corsRules = deserializeCorsRules(bucket.corsRules);
+  if (corsRules.length > 0) {
+    const origin = (req.headers.origin as string | undefined) || '';
+    for (const [name, value] of Object.entries(corsHeadersForRequest(corsRules, origin, {}))) {
+      reply.header(name, value);
+    }
+  }
   reply.header('Content-Type', obj.contentType);
   reply.header('ETag', obj.etag);
   // Object metadata comes back verbatim; the default cache-control applies only

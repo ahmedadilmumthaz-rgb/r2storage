@@ -99,7 +99,14 @@ GET|PUT|HEAD|POST|DELETE  /s3/<bucket>[/<key>][?query]
 | GetBucketLifecycle | `GET /s3/<bucket>?lifecycle` | read | XML `<LifecycleConfiguration>` of prefix rules (`<ID>`, `<Filter><Prefix>`, `<Status>`, `<Expiration>` `<Days>` or `<Date>`); `404 NoSuchLifecycleConfiguration` when none set. XML parsed by regex — no XML parser (no XXE). |
 | PutBucketLifecycle | `PUT /s3/<bucket>?lifecycle` | write | body is the `<LifecycleConfiguration>` XML (capped at 1MB, 413; `Content-MD5` verified when supplied); up to 1000 rules; `<Days>` (≥1) XOR `<Date>` (ISO calendar date); malformed/invalid XML → `400 MalformedXML`. |
 | DeleteBucketLifecycle | `DELETE /s3/<bucket>?lifecycle` | write | clears the configuration, `204` |
-| Bucket-level PUT/DELETE (other) | `PUT`/`DELETE /s3/<bucket>` | write | only the `?lifecycle` subresource is supported; anything else → `400 InvalidRequest` |
+| GetBucketCors | `GET /s3/<bucket>?cors` | read | XML `<CORSConfiguration>` of stored rules; buckets that never got a `PutBucketCors` render their admin-set single origin (`corsOrigins`), or `404 NoSuchCORSConfiguration` when none is set. |
+| PutBucketCors | `PUT /s3/<bucket>?cors` | write | body is the `<CORSConfiguration>` XML (≤100 rules; each rule needs ≥1 `<AllowedOrigin>` + ≥1 known `<AllowedMethod>`; `MaxAgeSeconds` capped at 86400); `Content-MD5` verified when supplied; malformed/invalid → `400 MalformedXML`. Served on every object response and honored by preflight `OPTIONS`. |
+| DeleteBucketCors | `DELETE /s3/<bucket>?cors` | write | clears the stored rules (falls back to the admin-set origin), `204` |
+| Preflight `OPTIONS` | `OPTIONS /s3/<bucket>/<key>` (and `/s3/<bucket>`) | none | browser CORS preflight answered from the bucket's CORS rules: `Access-Control-Allow-Origin`/`-Methods`/`-Headers`/`-Max-Age`/`-Expose-Headers`. Disallowed origin or method → `403 AccessForbidden`. Unauthenticated by design — the follow-up request carries credentials. |
+| GetBucketTagging | `GET /s3/<bucket>?tagging` | read | XML `<Tagging><TagSet>` of stored bucket tags (same 10-tag / 128+256-char limits as object tags) |
+| PutBucketTagging | `PUT /s3/<bucket>?tagging` | write | body is the `<Tagging>` XML; `Content-MD5` verified when supplied; malformed → `400 MalformedXML` |
+| DeleteBucketTagging | `DELETE /s3/<bucket>?tagging` | write | clears the tags, `204` |
+| Bucket-level PUT/DELETE (other) | `PUT`/`DELETE /s3/<bucket>` | write | only the `?lifecycle`, `?cors`, and `?tagging` subresources are supported; anything else → `400 InvalidRequest` |
 
 ### 2.2 Response conventions
 

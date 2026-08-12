@@ -468,6 +468,48 @@ check "GetObjectAttributes size" "18" "$(curl -s "${AUTH_OPTS[@]}" "$B/s3/smoke/
 check "GetObjectAttributes checksum block" "1" "$(curl -s "${AUTH_OPTS[@]}" -H 'x-amz-checksum-mode: enabled' "$B/s3/smoke/crccheck.txt?attributes" | grep -c '<ChecksumCRC32>')"
 check "GetObjectAttributes missing -> 404" "404" "$(status_of "${AUTH_OPTS[@]}" "$B/s3/smoke/nope.txt?attributes")"
 
+# --- bucket CORS (PutBucketCors + preflight) ------------------------------------
+# smoke2 carries a single-rule CORS config: only https://app.example.com with
+# PUT/GET. Preflight OPTIONS is answered without auth (the follow-up request
+# carries credentials); a disallowed origin/method gets 403 AccessForbidden.
+echo "== bucket CORS =="
+CORS_BODY='<CORSConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><CORSRule><AllowedOrigin>https://app.example.com</AllowedOrigin><AllowedMethod>PUT</AllowedMethod><AllowedMethod>GET</AllowedMethod><AllowedHeader>*</AllowedHeader><ExposeHeader>ETag</ExposeHeader><MaxAgeSeconds>3600</MaxAgeSeconds></CORSRule></CORSConfiguration>'
+CORSMD5="$(printf '%s' "$CORS_BODY" | openssl dgst -md5 -binary | base64)"
+check "PUT ?cors (with Content-MD5)" "200" "$(status_of -X PUT "${RCOPY_OPTS[@]}" -H "Content-MD5: $CORSMD5" --data "$CORS_BODY" "$B/s3/smoke2?cors")"
+check "GET ?cors returns config" "1" "$(curl -s "${RCOPY_OPTS[@]}" "$B/s3/smoke2?cors" | grep -c '<CORSConfiguration')"
+check "GET ?cors echoes origin" "1" "$(curl -s "${RCOPY_OPTS[@]}" "$B/s3/smoke2?cors" | grep -c '<AllowedOrigin>https://app.example.com</AllowedOrigin>')"
+check "GET ?cors echoes method" "1" "$(curl -s "${RCOPY_OPTS[@]}" "$B/s3/smoke2?cors" | grep -c '<AllowedMethod>PUT</AllowedMethod>')"
+check "GET ?cors echoes MaxAgeSeconds" "1" "$(curl -s "${RCOPY_OPTS[@]}" "$B/s3/smoke2?cors" | grep -c '<MaxAgeSeconds>3600</MaxAgeSeconds>')"
+check "PUT ?cors wrong Content-MD5 -> 400" "400" "$(status_of -X PUT "${RCOPY_OPTS[@]}" -H 'Content-MD5: QUJDRA==' --data "$CORS_BODY" "$B/s3/smoke2?cors")"
+check "PUT ?cors missing AllowedOrigin -> 400" "400" "$(status_of -X PUT "${RCOPY_OPTS[@]}" --data '<CORSConfiguration><CORSRule><AllowedMethod>GET</AllowedMethod></CORSRule></CORSConfiguration>' "$B/s3/smoke2?cors")"
+check "PUT ?cors bad method -> 400" "400" "$(status_of -X PUT "${RCOPY_OPTS[@]}" --data '<CORSConfiguration><CORSRule><AllowedOrigin>*</AllowedOrigin><AllowedMethod>FOO</AllowedMethod></CORSRule></CORSConfiguration>' "$B/s3/smoke2?cors")"
+check "preflight allowed origin -> 200" "200" "$(status_of -X OPTIONS -H 'Origin: https://app.example.com' -H 'Access-Control-Request-Method: PUT' "$B/s3/smoke2/hi.txt")"
+check "preflight echoes allow-origin" "https://app.example.com" "$(curl -s -D - -o /dev/null -X OPTIONS -H 'Origin: https://app.example.com' -H 'Access-Control-Request-Method: PUT' "$B/s3/smoke2/hi.txt" | grep -i '^access-control-allow-origin:' | tr -d '\r' | cut -d' ' -f2-)"
+check "preflight reports allow-methods" "1" "$(curl -s -D - -o /dev/null -X OPTIONS -H 'Origin: https://app.example.com' -H 'Access-Control-Request-Method: PUT' "$B/s3/smoke2/hi.txt" | grep -i '^access-control-allow-methods:' | grep -c PUT)"
+check "preflight echoes requested headers" "1" "$(curl -s -D - -o /dev/null -X OPTIONS -H 'Origin: https://app.example.com' -H 'Access-Control-Request-Method: PUT' -H 'Access-Control-Request-Headers: content-type, x-amz-checksum-crc32' "$B/s3/smoke2/hi.txt" | grep -i '^access-control-allow-headers:' | grep -c 'x-amz-checksum-crc32')"
+check "preflight reports max-age" "3600" "$(curl -s -D - -o /dev/null -X OPTIONS -H 'Origin: https://app.example.com' -H 'Access-Control-Request-Method: PUT' "$B/s3/smoke2/hi.txt" | grep -i '^access-control-max-age:' | tr -d '\r' | cut -d' ' -f2)"
+check "preflight disallowed origin -> 403" "403" "$(status_of -X OPTIONS -H 'Origin: https://evil.example.com' -H 'Access-Control-Request-Method: PUT' "$B/s3/smoke2/hi.txt")"
+check "preflight method not allowed -> 403" "403" "$(status_of -X OPTIONS -H 'Origin: https://app.example.com' -H 'Access-Control-Request-Method: DELETE' "$B/s3/smoke2/hi.txt")"
+check "GET object echoes matched origin" "https://app.example.com" "$(curl -s -D - -o /dev/null -H 'Origin: https://app.example.com' "${RCOPY_OPTS[@]}" "$B/s3/smoke2/hi.txt" | grep -i '^access-control-allow-origin:' | tr -d '\r' | cut -d' ' -f2-)"
+check "GET object unmatching origin omits ACAO" "0" "$(curl -s -D - -o /dev/null -H 'Origin: https://evil.example.com' "${RCOPY_OPTS[@]}" "$B/s3/smoke2/hi.txt" | grep -ci '^access-control-allow-origin:')"
+check "DELETE ?cors clears config" "204" "$(status_of -X DELETE "${RCOPY_OPTS[@]}" "$B/s3/smoke2?cors")"
+check "GET ?cors after delete drops rules" "0" "$(curl -s "${RCOPY_OPTS[@]}" "$B/s3/smoke2?cors" | grep -c 'app.example.com')"
+check "preflight after delete -> 403" "403" "$(status_of -X OPTIONS -H 'Origin: https://app.example.com' -H 'Access-Control-Request-Method: PUT' "$B/s3/smoke2/hi.txt")"
+check "legacy admin origin still served after delete" "1" "$(curl -s "${RCOPY_OPTS[@]}" "$B/s3/smoke2?cors" | grep -c '<AllowedOrigin>\*</AllowedOrigin>')"
+
+# --- bucket tagging (PutBucketTagging) -------------------------------------------
+echo "== bucket tagging =="
+BTAG_BODY='<Tagging xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><TagSet><Tag><Key>env</Key><Value>prod</Value></Tag><Tag><Key>team</Key><Value>media</Value></Tag></TagSet></Tagging>'
+BTAGMD5="$(printf '%s' "$BTAG_BODY" | openssl dgst -md5 -binary | base64)"
+check "PUT bucket ?tagging (with Content-MD5)" "200" "$(status_of -X PUT "${RCOPY_OPTS[@]}" -H "Content-MD5: $BTAGMD5" --data "$BTAG_BODY" "$B/s3/smoke2?tagging")"
+check "GET bucket ?tagging returns tags" "1" "$(curl -s "${RCOPY_OPTS[@]}" "$B/s3/smoke2?tagging" | grep -c '<Key>env</Key><Value>prod</Value>')"
+check "GET bucket ?tagging second tag" "1" "$(curl -s "${RCOPY_OPTS[@]}" "$B/s3/smoke2?tagging" | grep -c '<Key>team</Key><Value>media</Value>')"
+check "PUT bucket ?tagging wrong Content-MD5 -> 400" "400" "$(status_of -X PUT "${RCOPY_OPTS[@]}" -H 'Content-MD5: QUJDRA==' --data "$BTAG_BODY" "$B/s3/smoke2?tagging")"
+check "PUT bucket ?tagging malformed XML -> 400" "400" "$(status_of -X PUT "${RCOPY_OPTS[@]}" --data '<Tagging><TagSet><Tag><Key>x</Key>' "$B/s3/smoke2?tagging")"
+check "DELETE bucket ?tagging clears" "204" "$(status_of -X DELETE "${RCOPY_OPTS[@]}" "$B/s3/smoke2?tagging")"
+check "GET bucket ?tagging empty after delete" "1" "$(curl -s "${RCOPY_OPTS[@]}" "$B/s3/smoke2?tagging" | grep -c '<TagSet')"
+check "bucket-level PUT ?policy -> 400" "400" "$(status_of -X PUT "${RCOPY_OPTS[@]}" --data x "$B/s3/smoke2?policy")"
+
 # --- bucket lifecycle ----------------------------------------------------------
 echo "== bucket lifecycle =="
 LIFECYCLE_OK='<LifecycleConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Rule><ID>keep30</ID><Filter><Prefix>logs/</Prefix></Filter><Status>Enabled</Status><Expiration><Days>30</Days></Expiration></Rule><Rule><ID>retired</ID><Filter><Prefix>old/</Prefix></Filter><Status>Disabled</Status><Expiration><Days>7</Days></Expiration></Rule></LifecycleConfiguration>'
