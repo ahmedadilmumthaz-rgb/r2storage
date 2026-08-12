@@ -50,7 +50,7 @@ It speaks the **real S3 API** (SigV4 auth, multipart uploads, presigned URLs —
 
 | Engineering concern | Implementation |
 |---|---|
-| **Protocol fidelity** | Real AWS **SigV4** signature verification (header + presigned URLs), multipart uploads (create/part/copy/complete/abort + `ListMultipartUploads`/`ListParts` pagination), server-side **CopyObject** (`x-amz-copy-source`, `x-amz-metadata-directive`), batch **DeleteObjects** (`POST ?delete`, quiet/non-quiet), `ListObjectsV1`+`V2` (`marker` / `continuation-token`, `delimiter`, `encoding-type=url`), **CRC-32 + Content-MD5** integrity checks (`x-amz-checksum-crc32`, `x-amz-checksum-mode`), **bucket lifecycle** (prefix rules, `Days`/`Date` expiration, background sweeper), streaming GET/PUT, **byte-range + conditional GET** (`Range` → `206`/`416`, `If-None-Match`/`If-Modified-Since` → `304`), and **conditional writes** (`If-Match`/`If-Unmodified-Since` → `412`, `If-None-Match: *` → `409`) — the full stack a media CDN needs. |
+| **Protocol fidelity** | Real AWS **SigV4** signature verification (header + presigned URLs), multipart uploads (create/part/copy/complete/abort + `ListMultipartUploads`/`ListParts` pagination), server-side **CopyObject** (`x-amz-copy-source`, `x-amz-metadata-directive`), batch **DeleteObjects** (`POST ?delete`, quiet/non-quiet), service-level `ListBuckets` + `ListObjectsV1`+`V2` (`marker` / `continuation-token`, `delimiter`, `encoding-type=url`), **CRC-32 + Content-MD5** integrity checks (`x-amz-checksum-crc32`, `x-amz-checksum-mode`), **bucket lifecycle** (prefix rules, `Days`/`Date` expiration, background sweeper), streaming GET/PUT, **byte-range + conditional GET** (`Range` → `206`/`416`, `If-None-Match`/`If-Modified-Since` → `304`), and **conditional writes** (`If-Match`/`If-Unmodified-Since` → `412`, `If-None-Match: *` → `409`) — the full stack a media CDN needs. |
 | **AuthN/AuthZ** | Access Key / Secret pairs with `FULL`/`READ_ONLY`/`WRITE_ONLY` permissions and per-key bucket filters; dashboard sessions via `HttpOnly SameSite=Strict` cookies (hashed server-side, revocable), with sliding idle expiry and an absolute lifetime cap. |
 | **Brute-force defense** | Escalating login lockout (per-IP block + doubling global cooldown with `Retry-After`), failed-login audit table, constant-time secret comparison, per-scope rate limits keyed off the real client IP, an optional admin IP allowlist (`ADMIN_ALLOWED_CIDRS`), and optional **TOTP 2FA** (`ADMIN_TOTP_SECRET`). |
 | **DoS hardening** | Bounded socket lifetimes (slowloris), streamed-to-disk S3 bodies (never buffered), multipart quota enforced at part time, capped 1MB part-list body, and regex-only XML parsing (no XXE surface). |
@@ -62,7 +62,7 @@ It speaks the **real S3 API** (SigV4 auth, multipart uploads, presigned URLs —
 | **Provisioning automation** | `docker run` → health wait → default bucket/keys → nginx map write + reload, with full rollback on failure. |
 | **Operational visibility** | Operator console with live per-tenant health/latency and quota; request logging + admin analytics. |
 | **Deploy automation** | One-command baremetal installer (per-instance systemd + nginx), Cloudflare-origin-cert TLS, per-instance backup cron. |
-| **Testing** | Backend smoke suite (**273 checks** — S3, multipart, copy, batch delete, object metadata, object tags, listing/subresources (V1+V2), bucket subresources, lifecycle, presigned, ranges/conditionals, conditional writes, CRC-32 checksums, auth, rate limits) and a full-platform E2E smoke (`18 checks`), both runnable in CI. |
+| **Testing** | Backend smoke suite (**282 checks** — S3, multipart, copy, batch delete, object metadata, object tags, listing/subresources (V1+V2), bucket subresources, ListBuckets, lifecycle, presigned, ranges/conditionals, conditional writes, CRC-32 checksums, auth, rate limits) and a full-platform E2E smoke (`18 checks`), both runnable in CI. |
 
 ---
 
@@ -142,7 +142,7 @@ Open `http://localhost:5173` and log in with your `ADMIN_SECRET`.
 
 ```bash
 npm run build             # build backend + frontend
-npm test                  # backend smoke suite (273 checks, boots a throwaway instance)
+npm test                  # backend smoke suite (282 checks, boots a throwaway instance)
 bash scripts/sec-check.sh # ad-hoc security spot-checks (secret-less auth, presigned caps, login lockout)
 npm run test:platform     # platform E2E smoke — needs a running platform (see PLATFORM.md)
 ```

@@ -305,6 +305,20 @@ check "malformed copy-source -> 400" "400" "$(status_of "${RCOPY_OPTS[@]}" -X PU
 check "scoped key cannot copy cross-bucket -> 403" "403" "$(status_of -X PUT "${AUTH_OPTS[@]}" -H "x-amz-copy-source: /smoke/hello.txt" "$B/s3/smoke2/denied.txt")"
 check "copy with If-None-Match: * on existing dest -> 409" "409" "$(status_of "${RCOPY_OPTS[@]}" -X PUT -H "x-amz-copy-source: /smoke/hello.txt" -H 'If-None-Match: *' "$B/s3/smoke2/hi.txt")"
 
+# --- ListBuckets (GET /s3) -----------------------------------------------------
+# smoke + smoke2 both exist here. RCOPY_OPTS is an unrestricted key; AUTH_OPTS is
+# scoped to bucket "smoke" and must see only its own bucket in the service list.
+echo "== ListBuckets =="
+check "ListBuckets -> 200" "200" "$(status_of "${RCOPY_OPTS[@]}" "$B/s3")"
+check "ListBuckets root element" "1" "$(curl -s "${RCOPY_OPTS[@]}" "$B/s3" | grep -c '<ListAllMyBucketsResult')"
+check "ListBuckets lists smoke" "1" "$(curl -s "${RCOPY_OPTS[@]}" "$B/s3" | grep -c '<Name>smoke</Name>')"
+check "ListBuckets lists smoke2" "1" "$(curl -s "${RCOPY_OPTS[@]}" "$B/s3" | grep -c '<Name>smoke2</Name>')"
+check "ListBuckets total = 2" "2" "$(curl -s "${RCOPY_OPTS[@]}" "$B/s3" | grep -c '<Bucket>')"
+check "ListBuckets includes CreationDate" "2" "$(curl -s "${RCOPY_OPTS[@]}" "$B/s3" | grep -c '<CreationDate>')"
+check "ListBuckets anonymous -> 403" "403" "$(status_of "$B/s3")"
+check "ListBuckets scoped key sees own bucket" "1" "$(curl -s "${AUTH_OPTS[@]}" "$B/s3" | grep -c '<Name>smoke</Name>')"
+check "ListBuckets scoped key hides other buckets" "0" "$(curl -s "${AUTH_OPTS[@]}" "$B/s3" | grep -c '<Name>smoke2</Name>')"
+
 # --- batch delete (DeleteObjects) ---------------------------------------------------
 echo "== DeleteObjects =="
 for k in del1.txt del2.txt del3.txt keep.txt; do

@@ -117,6 +117,36 @@ function permissionDenied(auth: AuthResult, bucketName: string, required: 'read'
 export async function s3Routes(fastify: FastifyInstance) {
   // Catch-all S3 protocol handler under `/s3/:bucket/*` and `/s3/:bucket`
 
+  // 0. GET /s3 (ListBuckets) — the service-level operation SDKs call to
+  // enumerate buckets. Any valid key authenticates; keys scoped to one bucket
+  // (the admin API's bucketFilter) only see that bucket, mirroring IAM scoping.
+  fastify.get('/s3', async (req: FastifyRequest, reply: FastifyReply) => {
+    const query = req.query as Record<string, string>;
+    const auth = await S3Auth.authenticateRequest(req.headers, query, req.method, req.url);
+    if (!auth.authenticated) {
+      return reply.status(403).type('application/xml').send(renderS3ErrorXml('AccessDenied', auth.error || 'Access Denied'));
+    }
+    const buckets = auth.bucketFilter
+      ? await db.bucket.findMany({ where: { name: auth.bucketFilter } })
+      : await db.bucket.findMany({ orderBy: { name: 'asc' } });
+    const bucketsXml = buckets
+      .map(
+        (b) => `\n    <Bucket>\n      <Name>${escapeXml(b.name)}</Name>\n      <CreationDate>${b.createdAt.toISOString()}</CreationDate>\n    </Bucket>`
+      )
+      .join('');
+    return reply.status(200).type('application/xml').send(
+      `<?xml version="1.0" encoding="UTF-8"?>
+<ListAllMyBucketsResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <Owner>
+    <ID>anon</ID>
+    <DisplayName>admin</DisplayName>
+  </Owner>
+  <Buckets>${bucketsXml}
+  </Buckets>
+</ListAllMyBucketsResult>`
+    );
+  });
+
   // HeadBucket (HEAD /s3/:bucket) — SDKs ping this before listing/uploading.
   // Registered BEFORE the GET route so fastify's exposeHeadRoutes skips the
   // auto-created HEAD (which would otherwise run the full list handler).

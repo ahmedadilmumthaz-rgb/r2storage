@@ -82,6 +82,7 @@ GET|PUT|HEAD|POST|DELETE  /s3/<bucket>[/<key>][?query]
 
 | Operation | Method + path | Auth | Notes |
 | --- | --- | --- | --- |
+| ListBuckets | `GET /s3` | any valid key (see scoping) | XML `<ListAllMyBucketsResult>` with `<Owner>` + `<Bucket>` entries (name + creation date). A key scoped to one bucket (admin `bucketFilter`) lists only that bucket; anonymous → `403 AccessDenied`. |
 | ListObjectsV1 + V2 | `GET /s3/<bucket>?prefix=<p>` (V1: `marker=`; V2: `list-type=2&continuation-token=`/`start-after=`) | public buckets: none; private: read | XML `<ListBucketResult>`; up to 1000 keys; `delimiter=` folds into `<CommonPrefixes>`; `encoding-type=url` URL-encodes keys; both dialects paginate (V1 `NextMarker`, V2 `NextContinuationToken`) |
 | PutObject | `PUT /s3/<bucket>/<key>` | write | body is streamed to disk; returns `ETag` header; supports conditional writes (below) |
 | GetObject | `GET /s3/<bucket>/<key>` | public: none; private: read | streams body; sets `Content-Type`, `ETag`, `Content-Length`; supports **byte-range + conditional GET** (below) |
