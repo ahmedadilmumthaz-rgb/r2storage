@@ -29,6 +29,7 @@ import {
   renderCorsXml,
   corsHeadersForRequest,
 } from './cors';
+import { validateSseC, applySseCResponseHeaders } from './ssec';
 
 function bodyAsStream(body: unknown): NodeJS.ReadableStream {
   if (body && typeof (body as any).pipe === 'function') {
@@ -762,6 +763,13 @@ export async function s3Routes(fastify: FastifyInstance) {
 
     // Set CORS headers (matched against PutBucketCors rules when configured)
     applyCorsHeaders(reply, bucket, req);
+    // SSE-C request headers are validated against the wire protocol and echoed
+    // back; the blob's real protection is the server-managed at-rest cipher.
+    const ssecGet = validateSseC(req.headers as Record<string, unknown>);
+    if (ssecGet.kind === 'error') {
+      return reply.status(ssecGet.error.status).type('application/xml').send(renderS3ErrorXml(ssecGet.error.code, ssecGet.error.message));
+    }
+    applySseCResponseHeaders(reply, ssecGet);
     reply.header('Content-Type', obj.contentType);
     reply.header('ETag', obj.etag);
     // Object metadata (x-amz-meta-*, Content-Disposition/Encoding/Cache-Control)
@@ -935,6 +943,17 @@ export async function s3Routes(fastify: FastifyInstance) {
         );
       }
 
+      // SSE-C header trios (destination + copy-source) are validated like S3;
+      // see ./ssec for the validate-and-echo facade this server uses.
+      const destSsec = validateSseC(req.headers as Record<string, unknown>);
+      if (destSsec.kind === 'error') {
+        return reply.status(destSsec.error.status).type('application/xml').send(renderS3ErrorXml(destSsec.error.code, destSsec.error.message));
+      }
+      const srcSsec = validateSseC(req.headers as Record<string, unknown>, true);
+      if (srcSsec.kind === 'error') {
+        return reply.status(srcSsec.error.status).type('application/xml').send(renderS3ErrorXml(srcSsec.error.code, srcSsec.error.message));
+      }
+
       const srcBucketRec = await db.bucket.findUnique({ where: { name: srcBucket } });
       if (!srcBucketRec) {
         return reply.status(404).type('application/xml').send(renderS3ErrorXml('NoSuchBucket', 'The source bucket does not exist.'));
@@ -1024,6 +1043,7 @@ export async function s3Routes(fastify: FastifyInstance) {
 
         applyCorsHeaders(reply, bucket, req);
         reply.header('Access-Control-Expose-Headers', 'ETag');
+        applySseCResponseHeaders(reply, destSsec);
         return reply.status(200).type('application/xml').send(
           `<?xml version="1.0" encoding="UTF-8"?>
 <CopyPartResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
@@ -1128,6 +1148,7 @@ export async function s3Routes(fastify: FastifyInstance) {
 
       applyCorsHeaders(reply, bucket, req);
       reply.header('Access-Control-Expose-Headers', 'ETag');
+      applySseCResponseHeaders(reply, destSsec);
       return reply.status(200).type('application/xml').send(
         `<?xml version="1.0" encoding="UTF-8"?>
 <CopyObjectResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
@@ -1138,6 +1159,12 @@ export async function s3Routes(fastify: FastifyInstance) {
     }
 
     const contentType = (req.headers['content-type'] as string) || mime.lookup(key) || 'application/octet-stream';
+
+    // SSE-C on plain PUTs / UploadPart: validated once for both paths below.
+    const ssec = validateSseC(req.headers as Record<string, unknown>);
+    if (ssec.kind === 'error') {
+      return reply.status(ssec.error.status).type('application/xml').send(renderS3ErrorXml(ssec.error.code, ssec.error.message));
+    }
 
     // UploadPart (multipart)
     const uploadId = query['uploadId'];
@@ -1185,6 +1212,7 @@ export async function s3Routes(fastify: FastifyInstance) {
       });
 
       applyCorsHeaders(reply, bucket, req);
+      applySseCResponseHeaders(reply, ssec);
       reply.header('ETag', part.etag);
       return reply.status(200).send();
     }
@@ -1284,6 +1312,7 @@ export async function s3Routes(fastify: FastifyInstance) {
     });
 
     applyCorsHeaders(reply, bucket, req);
+    applySseCResponseHeaders(reply, ssec);
     reply.header('ETag', etag);
     return reply.status(200).send();
   });
@@ -1382,6 +1411,10 @@ export async function s3Routes(fastify: FastifyInstance) {
           renderS3ErrorXml('InvalidTag', 'The tag provided was not valid, or the tag set contained duplicate or too many tags.')
         );
       }
+      const ssec = validateSseC(req.headers as Record<string, unknown>);
+      if (ssec.kind === 'error') {
+        return reply.status(ssec.error.status).type('application/xml').send(renderS3ErrorXml(ssec.error.code, ssec.error.message));
+      }
       await db.multipartUpload.create({
         data: {
           bucketName,
@@ -1392,6 +1425,7 @@ export async function s3Routes(fastify: FastifyInstance) {
           tags: tags ? serializeTags(tags) : null,
         },
       });
+      applySseCResponseHeaders(reply, ssec);
       return reply.status(200).type('application/xml').send(renderMultipartInitXml(bucketName, key, uploadId));
     }
 

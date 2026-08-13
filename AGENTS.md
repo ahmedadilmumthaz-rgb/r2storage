@@ -38,7 +38,7 @@ platform/         Next.js SaaS control plane (signup, provisioning, metering, St
   lib/               provision.ts, nginx.ts, usage.ts, stripe.ts, session.ts, ...
 deploy/           baremetal nginx/systemd templates + SaaS VPS installer
 deploy.sh         parameterized baremetal installer (INSTANCE/PORT/BASE_DOMAIN)
-scripts/          smoke.sh (backend, 311 checks), platform-smoke.sh, sec-check.sh
+scripts/          smoke.sh (backend, 331 checks), platform-smoke.sh, sec-check.sh
 examples/         integration recipes (browser-upload, nextjs-uploader, laravel, ...)
 ```
 
@@ -47,7 +47,7 @@ examples/         integration recipes (browser-upload, nextjs-uploader, laravel,
 ```bash
 npm install --prefix backend && npm install --prefix frontend   # deps
 npm run build            # tsc backend + vite frontend
-npm test                 # scripts/smoke.sh — boots a throwaway backend, 311 checks
+npm test                 # scripts/smoke.sh — boots a throwaway backend, 331 checks
 npm run test:platform    # platform E2E smoke (needs a running platform first)
 npm run lint --prefix platform    # eslint (platform only; backend/frontend have no lint)
 bash scripts/sec-check.sh         # ad-hoc security spot-checks (spins a temp server)
@@ -110,6 +110,12 @@ explicit, reviewed reason.**
    (`STORAGE_ENCRYPTION_KEY`, 64 hex chars) transparently encrypts every new
    blob with a per-object random IV (magic `r2enc1` + IV header); legacy
    plaintext blobs stay readable via magic detection (`storage/crypto.ts`).
+   SSE-C (`x-amz-server-side-encryption-customer-*`, `api/ssec.ts`) is a
+   **validate + echo facade**: headers are validated against the S3 wire
+   protocol and echoed back, but the customer key is never stored or derived
+   from — the real at-rest cipher is `STORAGE_ENCRYPTION_KEY`, and SSE-C is
+   rejected (400) when that key is unset. Do not weaken this into pretending a
+   per-object customer key protects the blob.
    Request XML is parsed via regex only — no XML parser, so no XXE; all XML
    responses escape interpolated values.
 6. **Server config.** CORS is disabled globally (`origin: false`); only object

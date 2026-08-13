@@ -2,8 +2,8 @@
 #
 # R2 Storage smoke test — boots a throwaway backend instance (temp DB + storage
 # dir + free port) and exercises the full surface: session auth, admin API, S3
-# PUT/GET/HEAD/list, multipart upload, presigned URLs, public buckets, logout,
-# and rate limiting. Requires a built backend (npm run build) and `curl` + `node`.
+# PUT/GET/HEAD/list, multipart upload, SSE-C, presigned URLs, public buckets,
+# logout, and rate limiting. Requires a built backend (npm run build) and `curl` + `node`.
 #
 # Usage:  bash scripts/smoke.sh            (or: npm test)
 # Env:    SMOKE_PORT  override the test port (default picks a free one)
@@ -509,6 +509,51 @@ check "PUT bucket ?tagging malformed XML -> 400" "400" "$(status_of -X PUT "${RC
 check "DELETE bucket ?tagging clears" "204" "$(status_of -X DELETE "${RCOPY_OPTS[@]}" "$B/s3/smoke2?tagging")"
 check "GET bucket ?tagging empty after delete" "1" "$(curl -s "${RCOPY_OPTS[@]}" "$B/s3/smoke2?tagging" | grep -c '<TagSet')"
 check "bucket-level PUT ?policy -> 400" "400" "$(status_of -X PUT "${RCOPY_OPTS[@]}" --data x "$B/s3/smoke2?policy")"
+
+# --- SSE-C (validate + echo compatibility surface) ------------------------------
+# The server adopts S3's SSE-C wire protocol but stores blobs with its own
+# server-managed AES-256-GCM key: the customer key trio is validated (well-formed
+# base64 256-bit key + matching base64 key-MD5) and echoed back, never stored or
+# derived from — so any well-formed key reads any object (see ssec.ts).
+echo "== SSE-C =="
+SSEC_KEY_B64="$(openssl rand -base64 32)"
+SSEC_KEY_MD5="$(node -e "process.stdout.write(require('crypto').createHash('md5').update(Buffer.from(process.argv[1],'base64')).digest('base64'))" "$SSEC_KEY_B64")"
+SSEC_OPTS=(-H "x-amz-server-side-encryption-customer-algorithm: AES256" -H "x-amz-server-side-encryption-customer-key: $SSEC_KEY_B64" -H "x-amz-server-side-encryption-customer-key-MD5: $SSEC_KEY_MD5")
+SSEC_ALL=("${AUTH_OPTS[@]}" "${SSEC_OPTS[@]}")
+
+check "SSE-C PUT -> 200" "200" "$(status_of -X PUT "${SSEC_ALL[@]}" --data-binary 'ssec-secret' "$B/s3/smoke/ssec.txt")"
+check "SSE-C PUT echoes algorithm" "AES256" "$(curl -s -D - -o /dev/null -X PUT "${SSEC_ALL[@]}" --data-binary 'ssec-secret' "$B/s3/smoke/ssec.txt" | grep -i '^x-amz-server-side-encryption-customer-algorithm:' | tr -d '\r' | cut -d' ' -f2-)"
+check "SSE-C PUT echoes key-MD5" "$SSEC_KEY_MD5" "$(curl -s -D - -o /dev/null -X PUT "${SSEC_ALL[@]}" --data-binary 'ssec-secret' "$B/s3/smoke/ssec.txt" | grep -i '^x-amz-server-side-encryption-customer-key-md5:' | tr -d '\r' | cut -d' ' -f2-)"
+check "SSE-C GET returns object" "ssec-secret" "$(curl -s "${SSEC_ALL[@]}" "$B/s3/smoke/ssec.txt")"
+check "SSE-C GET echoes algorithm" "1" "$(curl -s -D - -o /dev/null "${SSEC_ALL[@]}" "$B/s3/smoke/ssec.txt" | grep -ci '^x-amz-server-side-encryption-customer-algorithm: AES256')"
+check "SSE-C HEAD -> 200" "200" "$(status_of -I "${SSEC_ALL[@]}" "$B/s3/smoke/ssec.txt")"
+check "SSE-C object readable without key headers (facade)" "ssec-secret" "$(curl -s "${AUTH_OPTS[@]}" "$B/s3/smoke/ssec.txt")"
+OTHER_KEY="$(openssl rand -base64 32)"
+OTHER_MD5="$(node -e "process.stdout.write(require('crypto').createHash('md5').update(Buffer.from(process.argv[1],'base64')).digest('base64'))" "$OTHER_KEY")"
+check "SSE-C GET with a different valid key still works (facade)" "ssec-secret" "$(curl -s "${AUTH_OPTS[@]}" -H "x-amz-server-side-encryption-customer-algorithm: AES256" -H "x-amz-server-side-encryption-customer-key: $OTHER_KEY" -H "x-amz-server-side-encryption-customer-key-MD5: $OTHER_MD5" "$B/s3/smoke/ssec.txt")"
+
+check "SSE-C algorithm without key -> 400" "400" "$(status_of -X PUT "${AUTH_OPTS[@]}" -H "x-amz-server-side-encryption-customer-algorithm: AES256" --data x "$B/s3/smoke/ssec-bad.txt")"
+check "SSE-C unsupported algorithm -> 400" "400" "$(status_of -X PUT "${AUTH_OPTS[@]}" -H "x-amz-server-side-encryption-customer-algorithm: AES128" -H "x-amz-server-side-encryption-customer-key: $SSEC_KEY_B64" -H "x-amz-server-side-encryption-customer-key-MD5: $SSEC_KEY_MD5" --data x "$B/s3/smoke/ssec-bad.txt")"
+SHORT_KEY="$(openssl rand -base64 16)"
+SHORT_MD5="$(node -e "process.stdout.write(require('crypto').createHash('md5').update(Buffer.from(process.argv[1],'base64')).digest('base64'))" "$SHORT_KEY")"
+check "SSE-C key wrong size -> 400" "400" "$(status_of -X PUT "${AUTH_OPTS[@]}" -H "x-amz-server-side-encryption-customer-algorithm: AES256" -H "x-amz-server-side-encryption-customer-key: $SHORT_KEY" -H "x-amz-server-side-encryption-customer-key-MD5: $SHORT_MD5" --data x "$B/s3/smoke/ssec-bad.txt")"
+check "SSE-C malformed base64 key -> 400" "400" "$(status_of -X PUT "${AUTH_OPTS[@]}" -H "x-amz-server-side-encryption-customer-algorithm: AES256" -H "x-amz-server-side-encryption-customer-key: not-base64!" -H "x-amz-server-side-encryption-customer-key-MD5: $SSEC_KEY_MD5" --data x "$B/s3/smoke/ssec-bad.txt")"
+check "SSE-C wrong key MD5 -> 400" "400" "$(status_of -X PUT "${AUTH_OPTS[@]}" -H "x-amz-server-side-encryption-customer-algorithm: AES256" -H "x-amz-server-side-encryption-customer-key: $SSEC_KEY_B64" -H "x-amz-server-side-encryption-customer-key-MD5: QUJDRA==" --data x "$B/s3/smoke/ssec-bad.txt")"
+check "SSE-C GET with bad trio -> 400" "400" "$(status_of "${AUTH_OPTS[@]}" -H "x-amz-server-side-encryption-customer-algorithm: AES256" "$B/s3/smoke/ssec.txt")"
+
+SRCSSEC=(-H "x-amz-copy-source-server-side-encryption-customer-algorithm: AES256" -H "x-amz-copy-source-server-side-encryption-customer-key: $SSEC_KEY_B64" -H "x-amz-copy-source-server-side-encryption-customer-key-MD5: $SSEC_KEY_MD5")
+check "SSE-C CopyObject (dest+source) -> 200" "200" "$(status_of -X PUT "${SSEC_ALL[@]}" "${SRCSSEC[@]}" -H 'x-amz-copy-source: /smoke/ssec.txt' "$B/s3/smoke/ssec-copy.txt")"
+check "SSE-C Copy echoes dest algorithm" "1" "$(curl -s -D - -o /dev/null -X PUT "${SSEC_ALL[@]}" "${SRCSSEC[@]}" -H 'x-amz-copy-source: /smoke/ssec.txt' "$B/s3/smoke/ssec-copy.txt" | grep -ci '^x-amz-server-side-encryption-customer-algorithm: AES256')"
+check "SSE-C Copy bad source trio -> 400" "400" "$(status_of -X PUT "${SSEC_ALL[@]}" -H 'x-amz-copy-source-server-side-encryption-customer-algorithm: AES256' -H 'x-amz-copy-source: /smoke/ssec.txt' "$B/s3/smoke/ssec-copy.txt")"
+
+check "SSE-C CreateMultipartUpload echoes algorithm" "1" "$(curl -s -D - -o /dev/null "${SSEC_ALL[@]}" -X POST "$B/s3/smoke/ssec-mp.bin?uploads" | grep -ci '^x-amz-server-side-encryption-customer-algorithm: AES256')"
+MPSS_XML="$(curl -s "${SSEC_ALL[@]}" -X POST "$B/s3/smoke/ssec-mp.bin?uploads")"
+MPSS_ID="$(printf '%s' "$MPSS_XML" | sed -n 's:.*<UploadId>\([^<]*\)</UploadId>.*:\1:p')"
+check "SSE-C UploadPart -> 200" "200" "$(status_of -X PUT "${SSEC_ALL[@]}" --data-binary 'part-one' "$B/s3/smoke/ssec-mp.bin?partNumber=1&uploadId=$MPSS_ID")"
+check "SSE-C UploadPart echoes algorithm" "1" "$(curl -s -D - -o /dev/null -X PUT "${SSEC_ALL[@]}" --data-binary 'part-one' "$B/s3/smoke/ssec-mp.bin?partNumber=1&uploadId=$MPSS_ID" | grep -ci '^x-amz-server-side-encryption-customer-algorithm: AES256')"
+curl -s -o /dev/null "${AUTH_OPTS[@]}" -X DELETE "$B/s3/smoke/ssec-mp.bin?uploadId=$MPSS_ID"
+curl -s -o /dev/null "${AUTH_OPTS[@]}" -X DELETE "$B/s3/smoke/ssec.txt"
+curl -s -o /dev/null "${AUTH_OPTS[@]}" -X DELETE "$B/s3/smoke/ssec-copy.txt"
 
 # --- bucket lifecycle ----------------------------------------------------------
 echo "== bucket lifecycle =="
