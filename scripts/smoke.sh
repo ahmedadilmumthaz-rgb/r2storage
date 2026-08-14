@@ -693,6 +693,41 @@ PRESIGNED="$(json_field "$R" url)"
 R=$(curl -s "$PRESIGNED")
 check "presigned GET" "smoke-test-content" "$R"
 
+# --- SDK path-style SigV4 (s3auth.ts canonicalUriCandidates) --------------------
+# AWS SDKs pointed at this endpoint believe it's S3: their canonical URI is
+# /<bucket>/<key> (no /s3 prefix) — the server must verify that form too, not
+# just the /s3/... paths our admin API mints. This node script reproduces an
+# SDK's path-style presign exactly (empty-value params like `uploads` included).
+cat > "$TMP/sigv4.js" <<'EOF'
+const crypto = require('crypto');
+const REGION = 'us-east-1', SERVICE = 's3', TERMINATOR = 'aws4_request';
+const hmac = (k, i) => crypto.createHmac('sha256', k).update(i).digest();
+const sk = (sec, ds) => hmac(hmac(hmac(hmac('AWS4' + sec, ds), REGION), SERVICE), TERMINATOR);
+const enc = (v) => encodeURIComponent(v).replace(/[!'()*]/g, (c) => '%' + c.charCodeAt(0).toString(16).toUpperCase());
+const [method, uriPath, host, ak, sec, ...extra] = process.argv.slice(2);
+const now = new Date();
+const amzDate = now.toISOString().replace(/[:-]|\.\d{3}/g, '');
+const dateStamp = amzDate.slice(0, 8);
+const scope = `${dateStamp}/${REGION}/${SERVICE}/${TERMINATOR}`;
+const params = [
+  ['X-Amz-Algorithm', 'AWS4-HMAC-SHA256'],
+  ['X-Amz-Credential', `${ak}/${scope}`],
+  ['X-Amz-Date', amzDate],
+  ['X-Amz-Expires', '600'],
+  ['X-Amz-SignedHeaders', 'host'],
+  ...(extra.length ? extra.map((e) => { const i = e.indexOf('='); return [e.slice(0, i), e.slice(i + 1)]; }) : []),
+];
+const canonicalQuery = params.map(([n, v]) => `${enc(n)}=${enc(v)}`).sort().join('&');
+const canonicalRequest = [method, uriPath, canonicalQuery, `host:${host}\n`, 'host', 'UNSIGNED-PAYLOAD'].join('\n');
+const sts = `AWS4-HMAC-SHA256\n${amzDate}\n${scope}\n${crypto.createHash('sha256').update(canonicalRequest).digest('hex')}`;
+const signature = hmac(sk(sec, dateStamp), sts).toString('hex');
+process.stdout.write(`${canonicalQuery}&X-Amz-Signature=${signature}`);
+EOF
+check "SDK path-style presigned GET verifies (canonical URI /smoke/hello.txt)" "smoke-test-content" "$(curl -s "$B/s3/smoke/hello.txt?$(node "$TMP/sigv4.js" GET /smoke/hello.txt "127.0.0.1:$PORT" "$AK" "$SK")")"
+PATHSTYLE_MP_XML="$(curl -s -X POST "$B/s3/smoke/mp-style.bin?$(node "$TMP/sigv4.js" POST /smoke/mp-style.bin "127.0.0.1:$PORT" "$AK" "$SK" "uploads=")")"
+check "SDK path-style presigned POST ?uploads (empty-value param)" "1" "$(printf '%s' "$PATHSTYLE_MP_XML" | grep -c '<InitiateMultipartUploadResult')"
+check "SDK path-style ?uploads produces UploadId" "1" "$(printf '%s' "$PATHSTYLE_MP_XML" | grep -c '<UploadId>')"
+
 curl -s -o /dev/null -b "$COOKIES" -X PATCH -H "Content-Type: application/json" -d '{"isPublic":true}' "$B/api/admin/buckets/smoke"
 check "public bucket anonymous GET" "200" "$(status_of "$B/s3/smoke/hello.txt")"
 check "public bucket anonymous Range -> 206" "206" "$(status_of -H 'Range: bytes=0-4' "$B/s3/smoke/hello.txt")"

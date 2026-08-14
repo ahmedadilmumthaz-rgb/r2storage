@@ -52,6 +52,19 @@ function canonicalUri(rawPath: string): string {
   return rawPath;
 }
 
+// Canonical URI candidates accepted when verifying a signature. Our S3 surface
+// is /s3/<bucket>/<key>, which is the form admin-generated presigned URLs sign.
+// AWS SDKs pointed at this endpoint sign as if it were S3, producing path-style
+// canonical URIs of /<bucket>/<key> — they can't know about the /s3 prefix —
+// so accept that form too. The signature must still verify over the exact form,
+// so this adds compatibility without loosening authentication.
+function canonicalUriCandidates(rawPath: string): string[] {
+  if (rawPath.startsWith('/s3/')) {
+    return [rawPath, rawPath.slice(3)];
+  }
+  return [rawPath];
+}
+
 // Canonical query string: preserve the transmitted (already-encoded) pairs, sorted by name then value
 function canonicalQueryString(rawQuery: string): string {
   if (!rawQuery) return '';
@@ -200,24 +213,24 @@ export class S3Auth {
       .join('&');
 
     const host = (headers['host'] as string) || '';
-    const canonicalRequest = [
-      method,
-      canonicalUri(rawPath),
-      canonicalQueryString(signedQuery),
-      `host:${host}\n`,
-      'host',
-      'UNSIGNED-PAYLOAD',
-    ].join('\n');
-
     const scopeStr = `${scope.dateStamp}/${scope.region}/${SERVICE}/${TERMINATOR}`;
-    const stringToSign = `AWS4-HMAC-SHA256\n${amzDate}\n${scopeStr}\n${sha256Hex(canonicalRequest)}`;
-    const expected = hmac(signingKey(keyRecord.secretAccessKey, scope.dateStamp), stringToSign).toString('hex');
-
-    if (!signaturesMatch(expected, amzSig)) {
-      return { authenticated: false, error: 'Signature mismatch' };
+    const key = signingKey(keyRecord.secretAccessKey, scope.dateStamp);
+    for (const uri of canonicalUriCandidates(rawPath)) {
+      const canonicalRequest = [
+        method,
+        uri,
+        canonicalQueryString(signedQuery),
+        `host:${host}\n`,
+        'host',
+        'UNSIGNED-PAYLOAD',
+      ].join('\n');
+      const stringToSign = `AWS4-HMAC-SHA256\n${amzDate}\n${scopeStr}\n${sha256Hex(canonicalRequest)}`;
+      if (signaturesMatch(hmac(key, stringToSign).toString('hex'), amzSig)) {
+        return successfulAuth(keyRecord);
+      }
     }
 
-    return successfulAuth(keyRecord);
+    return { authenticated: false, error: 'Signature mismatch' };
   }
 
   private static async verifyHeaderSignature(
@@ -260,24 +273,24 @@ export class S3Auth {
 
     const canonicalHeaders = buildCanonicalHeaders(headers, signedHeaders);
     const payloadHash = (headers['x-amz-content-sha256'] as string) || 'UNSIGNED-PAYLOAD';
-    const canonicalRequest = [
-      method,
-      canonicalUri(rawPath),
-      canonicalQueryString(rawQuery),
-      canonicalHeaders,
-      signedHeaders.join(';'),
-      payloadHash,
-    ].join('\n');
-
     const scopeStr = `${scope.dateStamp}/${scope.region}/${SERVICE}/${TERMINATOR}`;
-    const stringToSign = `AWS4-HMAC-SHA256\n${amzDate}\n${scopeStr}\n${sha256Hex(canonicalRequest)}`;
-    const expected = hmac(signingKey(keyRecord.secretAccessKey, scope.dateStamp), stringToSign).toString('hex');
-
-    if (!signaturesMatch(expected, sigMatch[1])) {
-      return { authenticated: false, error: 'Signature mismatch' };
+    const key = signingKey(keyRecord.secretAccessKey, scope.dateStamp);
+    for (const uri of canonicalUriCandidates(rawPath)) {
+      const canonicalRequest = [
+        method,
+        uri,
+        canonicalQueryString(rawQuery),
+        canonicalHeaders,
+        signedHeaders.join(';'),
+        payloadHash,
+      ].join('\n');
+      const stringToSign = `AWS4-HMAC-SHA256\n${amzDate}\n${scopeStr}\n${sha256Hex(canonicalRequest)}`;
+      if (signaturesMatch(hmac(key, stringToSign).toString('hex'), sigMatch[1])) {
+        return successfulAuth(keyRecord);
+      }
     }
 
-    return successfulAuth(keyRecord);
+    return { authenticated: false, error: 'Signature mismatch' };
   }
 
   /**
