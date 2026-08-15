@@ -8,6 +8,11 @@ export interface AuthResult {
   permission?: string;
   bucketFilter?: string | null;
   error?: string;
+  // Set when the request was authorized by a SigV4 Authorization header whose
+  // payload hash is STREAMING-AWS4-HMAC-SHA256-PAYLOAD (or STREAMING-UNSIGNED-
+  // PAYLOAD): the derived signing key, scope and seed signature the body's
+  // aws-chunked decoder needs to verify each chunk as it is consumed.
+  streaming?: { signingKey: Buffer; amzDate: string; scopeStr: string; seedSignature: string };
 }
 
 const REGION = 'us-east-1';
@@ -125,12 +130,16 @@ function parseCredentialScope(credential: string): { accessKeyId: string; dateSt
   return { accessKeyId, dateStamp, region, service };
 }
 
-function successfulAuth(keyRecord: { accessKeyId: string; permission: string; bucketFilter: string | null }): AuthResult {
+function successfulAuth(
+  keyRecord: { accessKeyId: string; permission: string; bucketFilter: string | null },
+  streaming?: AuthResult['streaming']
+): AuthResult {
   return {
     authenticated: true,
     accessKeyId: keyRecord.accessKeyId,
     permission: keyRecord.permission,
     bucketFilter: keyRecord.bucketFilter,
+    ...(streaming ? { streaming } : {}),
   };
 }
 
@@ -286,7 +295,10 @@ export class S3Auth {
       ].join('\n');
       const stringToSign = `AWS4-HMAC-SHA256\n${amzDate}\n${scopeStr}\n${sha256Hex(canonicalRequest)}`;
       if (signaturesMatch(hmac(key, stringToSign).toString('hex'), sigMatch[1])) {
-        return successfulAuth(keyRecord);
+        return successfulAuth(
+          keyRecord,
+          payloadHash.startsWith('STREAMING-') ? { signingKey: key, amzDate, scopeStr, seedSignature: sigMatch[1] } : undefined
+        );
       }
     }
 

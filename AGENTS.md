@@ -38,7 +38,7 @@ platform/         Next.js SaaS control plane (signup, provisioning, metering, St
   lib/               provision.ts, nginx.ts, usage.ts, stripe.ts, session.ts, ...
 deploy/           baremetal nginx/systemd templates + SaaS VPS installer
 deploy.sh         parameterized baremetal installer (INSTANCE/PORT/BASE_DOMAIN)
-scripts/          smoke.sh (backend, 334 checks), platform-smoke.sh, sec-check.sh
+scripts/          smoke.sh (backend, 347 checks), platform-smoke.sh, sec-check.sh
 examples/         integration recipes (browser-upload, nextjs-uploader, laravel, ...)
 ```
 
@@ -47,7 +47,7 @@ examples/         integration recipes (browser-upload, nextjs-uploader, laravel,
 ```bash
 npm install --prefix backend && npm install --prefix frontend   # deps
 npm run build            # tsc backend + vite frontend
-npm test                 # scripts/smoke.sh — boots a throwaway backend, 334 checks
+npm test                 # scripts/smoke.sh — boots a throwaway backend, 347 checks
 npm run test:platform    # platform E2E smoke (needs a running platform first)
 npm run lint --prefix platform    # eslint (platform only; backend/frontend have no lint)
 bash scripts/sec-check.sh         # ad-hoc security spot-checks (spins a temp server)
@@ -91,6 +91,10 @@ explicit, reviewed reason.**
    `/s3/<bucket>/<key>` (admin-minted URLs) and SDK path-style `/bucket/<key>`
    (`canonicalUriCandidates` in `s3auth.ts`); a signature must still verify over
    the exact form, so this is compatibility, not a loosening of auth.
+   **aws-chunked streaming bodies** (`STREAMING-AWS4-HMAC-SHA256-PAYLOAD`,
+   `api/aws-chunked.ts`) are de-framed server-side and every chunk signature is
+   verified against the chain from the top-level Authorization signature —
+   integrity is maintained, never skipped.
  4. **Admin auth.** `ADMIN_SECRET` is compared constant-time; in production the
     server **refuses to boot** with the default secret (fail closed). Sessions are
     random tokens stored server-side as SHA-256 hashes in HttpOnly

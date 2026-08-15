@@ -30,12 +30,59 @@ import {
   corsHeadersForRequest,
 } from './cors';
 import { validateSseC, applySseCResponseHeaders } from './ssec';
+import { isAwsChunked, decodedContentLength, decodeAwsChunked, AwsChunkError } from './aws-chunked';
 
 function bodyAsStream(body: unknown): NodeJS.ReadableStream {
   if (body && typeof (body as any).pipe === 'function') {
     return body as NodeJS.ReadableStream;
   }
   return Readable.from((body as Buffer) || Buffer.alloc(0));
+}
+
+// AWS CLI and SDKs stream PUT bodies with aws-chunked framing (see
+// aws-chunked.ts); strip it so storage/checksums/quota see plaintext bytes.
+// Chunk signatures are verified while reading when the request signed them.
+function requestBodyStream(
+  req: FastifyRequest,
+  auth: AuthResult
+): { body: NodeJS.ReadableStream; trailerChecksum: Promise<string | null> | null } {
+  const raw = bodyAsStream(req.body);
+  const headers = req.headers as Record<string, unknown>;
+  if (!isAwsChunked(headers)) {
+    return { body: raw, trailerChecksum: null };
+  }
+  const sha = String(headers['x-amz-content-sha256'] ?? '');
+  const decoded = decodeAwsChunked(raw as Readable, sha, auth.streaming || {});
+  return { body: decoded.stream, trailerChecksum: decoded.trailerChecksum };
+}
+
+function awsChunkErrorReply(reply: FastifyReply, err: unknown) {
+  if (err instanceof AwsChunkError) {
+    return reply
+      .status(err.code === 'SignatureDoesNotMatch' ? 403 : 400)
+      .type('application/xml')
+      .send(renderS3ErrorXml(err.code, err.message));
+  }
+  return null;
+}
+
+// Verify an x-amz-checksum-crc32 that arrived in a trailer (aws-sdk-js streams
+// it there for aws-chunked PUTs instead of sending the header). Absent trailer
+// → no check, matching the header path's leniency.
+function trailerCrc32Mismatch(trailerChecksum: Promise<string | null> | null, computedBase64: string): Promise<string | null> {
+  if (!trailerChecksum) return Promise.resolve(null);
+  return trailerChecksum.then((trailerCrc) => {
+    if (!trailerCrc) return null;
+    const supplied = Buffer.from(trailerCrc, 'base64');
+    const computed = Buffer.from(computedBase64, 'base64');
+    if (supplied.length === 0 || supplied.toString('base64') !== trailerCrc) {
+      return renderS3ErrorXml('InvalidRequest', 'The x-amz-checksum-crc32 trailer is not valid base64 of a CRC-32.');
+    }
+    if (computed.length !== supplied.length || !crypto.timingSafeEqual(computed, supplied)) {
+      return renderS3ErrorXml('BadDigest', 'The checksum you specified did not match what we received.');
+    }
+    return null;
+  });
 }
 
 // Bucket-level CORS on object routes. When the bucket carries explicit CORS
@@ -1175,35 +1222,70 @@ export async function s3Routes(fastify: FastifyInstance) {
         return reply.status(404).type('application/xml').send(renderS3ErrorXml('NoSuchUpload', 'The specified upload does not exist.'));
       }
       // Multipart parts consume disk before the upload completes, so enforce the
-    // quota here too — otherwise parts could fill the disk while never being
-    // completed (the complete-time check would never fire). Re-uploading the
-    // same part replaces its bytes, so subtract the old part's size.
-    const existingPart = await db.multipartPart.findUnique({
-      where: { uploadId_partNumber: { uploadId, partNumber } },
-    });
-    const partsSum = (await db.multipartPart.aggregate({ where: { uploadId }, _sum: { size: true } }))._sum.size || 0;
-    const partLength = parseInt((req.headers['content-length'] as string) || '0', 10);
-    const addedBytes = partsSum - (existingPart?.size || 0) + partLength;
-    if (addedBytes > 0 && (await wouldExceedQuota(addedBytes))) {
-      return reply.status(507).type('application/xml').send(
-        renderS3ErrorXml('InsufficientStorage', 'Storage quota exceeded. Delete objects or upgrade your plan to free up space.')
-      );
-    }
+      // quota here too — otherwise parts could fill the disk while never being
+      // completed (the complete-time check would never fire). Re-uploading the
+      // same part replaces its bytes, so subtract the old part's size. Streaming
+      // clients declare the plaintext size via x-amz-decoded-content-length
+      // (Content-Length is then the framed size), so prefer it for the check.
+      const existingPart = await db.multipartPart.findUnique({
+        where: { uploadId_partNumber: { uploadId, partNumber } },
+      });
+      const partsSum = (await db.multipartPart.aggregate({ where: { uploadId }, _sum: { size: true } }))._sum.size || 0;
+      const partLength = decodedContentLength(req.headers as Record<string, unknown>) ?? parseInt((req.headers['content-length'] as string) || '0', 10);
+      const addedBytes = partsSum - (existingPart?.size || 0) + partLength;
+      if (addedBytes > 0 && (await wouldExceedQuota(addedBytes))) {
+        return reply.status(507).type('application/xml').send(
+          renderS3ErrorXml('InsufficientStorage', 'Storage quota exceeded. Delete objects or upgrade your plan to free up space.')
+        );
+      }
 
-    const part = await storageEngine.savePartFromStream(uploadId, partNumber, bodyAsStream(req.body));
+      let partBody: NodeJS.ReadableStream;
+      let trailerChecksum: Promise<string | null> | null = null;
+      try {
+        const stream = requestBodyStream(req, auth);
+        partBody = stream.body;
+        trailerChecksum = stream.trailerChecksum;
+      } catch (err) {
+        const errorReply = awsChunkErrorReply(reply, err);
+        if (errorReply) return errorReply;
+        throw err;
+      }
 
-    // Content-MD5 integrity check on the part, same as PutObject.
-    const md5Error = contentMd5Mismatch(req.headers as Record<string, unknown>, part.etag);
-    if (md5Error) {
-      await storageEngine.deleteObjectFile(part.storagePath);
-      return reply.status(400).type('application/xml').send(md5Error);
-    }
-    // Same for the CRC-32 checksum header aws-sdk-v3 sends on part uploads.
-    const crcError = checksumCrc32Mismatch(req.headers as Record<string, unknown>, part.crc32);
-    if (crcError) {
-      await storageEngine.deleteObjectFile(part.storagePath);
-      return reply.status(400).type('application/xml').send(crcError);
-    }
+      let part: Awaited<ReturnType<typeof storageEngine.savePartFromStream>>;
+      try {
+        part = await storageEngine.savePartFromStream(uploadId, partNumber, partBody);
+      } catch (err) {
+        const errorReply = awsChunkErrorReply(reply, err);
+        if (errorReply) return errorReply;
+        throw err;
+      }
+
+      // Authoritative post-write check (covers streams without a declared length).
+      if (await wouldExceedQuota(part.size, existingPart?.size || 0)) {
+        await storageEngine.deleteObjectFile(part.storagePath);
+        return reply.status(507).type('application/xml').send(
+          renderS3ErrorXml('InsufficientStorage', 'Storage quota exceeded. Delete objects or upgrade your plan to free up space.')
+        );
+      }
+
+      // Content-MD5 integrity check on the part, same as PutObject.
+      const md5Error = contentMd5Mismatch(req.headers as Record<string, unknown>, part.etag);
+      if (md5Error) {
+        await storageEngine.deleteObjectFile(part.storagePath);
+        return reply.status(400).type('application/xml').send(md5Error);
+      }
+      // Same for the CRC-32 checksum header aws-sdk-v3 sends on part uploads,
+      // and the identical value streamed as an x-amz-checksum-crc32 trailer.
+      const crcError = checksumCrc32Mismatch(req.headers as Record<string, unknown>, part.crc32);
+      if (crcError) {
+        await storageEngine.deleteObjectFile(part.storagePath);
+        return reply.status(400).type('application/xml').send(crcError);
+      }
+      const trailerCrcError = await trailerCrc32Mismatch(trailerChecksum, part.crc32);
+      if (trailerCrcError) {
+        await storageEngine.deleteObjectFile(part.storagePath);
+        return reply.status(400).type('application/xml').send(trailerCrcError);
+      }
 
       await db.multipartPart.upsert({
         where: { uploadId_partNumber: { uploadId, partNumber } },
@@ -1237,15 +1319,37 @@ export async function s3Routes(fastify: FastifyInstance) {
     }
 
     // Early reject when the declared Content-Length already exceeds the quota
-    // (avoids streaming a payload we know we will refuse).
-    const contentLength = parseInt((req.headers['content-length'] as string) || '0', 10);
+    // (avoids streaming a payload we know we will refuse). Streaming clients
+    // declare the plaintext size via x-amz-decoded-content-length, so prefer it.
+    const contentLength =
+      decodedContentLength(req.headers as Record<string, unknown>) ?? parseInt((req.headers['content-length'] as string) || '0', 10);
     if (contentLength > 0 && (await wouldExceedQuota(contentLength, existing?.size || 0))) {
       return reply.status(507).type('application/xml').send(
         renderS3ErrorXml('InsufficientStorage', 'Storage quota exceeded. Delete objects or upgrade your plan to free up space.')
       );
     }
 
-    const { size, etag, storagePath, crc32 } = await storageEngine.saveObjectFromStream(bucketName, key, bodyAsStream(req.body));
+    let objectBody: NodeJS.ReadableStream;
+    let trailerChecksum: Promise<string | null> | null = null;
+    try {
+      const stream = requestBodyStream(req, auth);
+      objectBody = stream.body;
+      trailerChecksum = stream.trailerChecksum;
+    } catch (err) {
+      const errorReply = awsChunkErrorReply(reply, err);
+      if (errorReply) return errorReply;
+      throw err;
+    }
+
+    let saved: Awaited<ReturnType<typeof storageEngine.saveObjectFromStream>>;
+    try {
+      saved = await storageEngine.saveObjectFromStream(bucketName, key, objectBody);
+    } catch (err) {
+      const errorReply = awsChunkErrorReply(reply, err);
+      if (errorReply) return errorReply;
+      throw err;
+    }
+    const { size, etag, storagePath, crc32 } = saved;
 
     // Content-MD5 integrity check: the ETag is the md5 of the payload, so a
     // mismatching header means corrupted (or tampered) bytes in flight — reject
@@ -1257,11 +1361,17 @@ export async function s3Routes(fastify: FastifyInstance) {
     }
     // aws-sdk-v3 sends x-amz-checksum-crc32 (base64 CRC-32) on every PutObject
     // by default since 2024; verify it the same way and store it so GET with
-    // x-amz-checksum-mode can return it.
+    // x-amz-checksum-mode can return it. Streaming uploads carry the same value
+    // as an x-amz-checksum-crc32 trailer instead of a header.
     const crcError = checksumCrc32Mismatch(req.headers as Record<string, unknown>, crc32);
     if (crcError) {
       await storageEngine.deleteObjectFile(storagePath);
       return reply.status(400).type('application/xml').send(crcError);
+    }
+    const trailerCrcError = await trailerCrc32Mismatch(trailerChecksum, crc32);
+    if (trailerCrcError) {
+      await storageEngine.deleteObjectFile(storagePath);
+      return reply.status(400).type('application/xml').send(trailerCrcError);
     }
 
     // x-amz-tagging stores tags alongside the object on PUT.

@@ -2,7 +2,7 @@
 #
 # R2 Storage smoke test — boots a throwaway backend instance (temp DB + storage
 # dir + free port) and exercises the full surface: session auth, admin API, S3
-# PUT/GET/HEAD/list, multipart upload, SSE-C, presigned URLs, public buckets,
+# PUT/GET/HEAD/list, multipart upload, SSE-C, aws-chunked streaming, presigned URLs, public buckets,
 # logout, and rate limiting. Requires a built backend (npm run build) and `curl` + `node`.
 #
 # Usage:  bash scripts/smoke.sh            (or: npm test)
@@ -684,6 +684,91 @@ check "multipart GET checksum matches plaintext" "$(crc32_of 'part-onepart-two')
 # and re-encrypt during assembly). Check the magic of every stored blob.
 ALLENC="$(find "$STORE/smoke" -type f | while read -r f; do head -c 6 "$f" | xxd -p; done | sort -u)"
 check "all stored blobs encrypted on disk" "7232656e6331" "$ALLENC"
+
+# --- aws-chunked streaming payloads ---------------------------------------------
+# AWS CLI and SDKs stream PUT bodies with aws-chunked framing and a STREAMING-*
+# payload hash (aws-chunked.ts). The node script below reproduces an SDK's
+# framing exactly: signed chunks (STREAMING-AWS4-HMAC-SHA256-PAYLOAD), unsigned
+# chunks (boto3-style STREAMING-UNSIGNED-PAYLOAD), a checksum trailer
+# (x-amz-trailer: x-amz-checksum-crc32), a wrong trailer CRC, a corrupted chunk
+# signature, and a signed UploadPart.
+echo "== aws-chunked streaming payloads =="
+cat > "$TMP/awschunk-put.js" <<'EOF'
+const http = require('http');
+const crypto = require('crypto');
+const REGION = 'us-east-1', SERVICE = 's3', TERMINATOR = 'aws4_request';
+const sha256 = (i) => crypto.createHash('sha256').update(i).digest('hex');
+const hmac = (k, i) => crypto.createHmac('sha256', k).update(i).digest();
+const signingKey = (sec, ds) => hmac(hmac(hmac(hmac('AWS4' + sec, ds), REGION), SERVICE), TERMINATOR);
+const crc32 = (buf) => {
+  const t = new Int32Array(256);
+  for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; t[n] = c; }
+  let c = 0xffffffff;
+  for (let i = 0; i < buf.length; i++) c = t[(c ^ buf[i]) & 0xff] ^ (c >>> 8);
+  return ((c ^ 0xffffffff) >>> 0).toString(16).padStart(8, '0');
+};
+const PORT = process.argv[2], MODE = process.argv[3], UPLOAD_ID = process.argv[4] || '';
+const AK = process.argv[5], SK = process.argv[6], HOST = '127.0.0.1:' + PORT, CHUNK = 65536;
+const payload = Buffer.alloc(4 * CHUNK);
+for (let i = 0; i < payload.length; i++) payload[i] = (i * 31 + 7) & 0xff;
+const now = new Date();
+const amzDate = now.toISOString().replace(/[:-]|\.\d{3}/g, '');
+const dateStamp = amzDate.slice(0, 8);
+const scope = `${dateStamp}/${REGION}/${SERVICE}/${TERMINATOR}`;
+const credential = `${AK}/${scope}`;
+const shaVal = MODE === 'unsigned' ? 'STREAMING-UNSIGNED-PAYLOAD' : 'STREAMING-AWS4-HMAC-SHA256-PAYLOAD';
+const headers = { host: HOST, 'x-amz-content-sha256': shaVal, 'x-amz-date': amzDate, 'content-type': 'application/octet-stream', 'x-amz-decoded-content-length': String(payload.length) };
+if (MODE === 'trailer' || MODE === 'badtrailer') headers['x-amz-trailer'] = 'x-amz-checksum-crc32';
+const signedHeaderList = Object.keys(headers).sort().join(';');
+const canonicalHeaders = Object.keys(headers).sort().map((n) => `${n}:${String(headers[n]).trim().replace(/\s+/g, ' ')}\n`).join('');
+const query = UPLOAD_ID ? `partNumber=1&uploadId=${UPLOAD_ID}` : '';
+const canonicalRequest = ['PUT', `/s3/smoke/awschunk-${MODE}.bin`, query, canonicalHeaders, signedHeaderList, shaVal].join('\n');
+const sts = `AWS4-HMAC-SHA256\n${amzDate}\n${scope}\n${sha256(canonicalRequest)}`;
+const seedSignature = hmac(signingKey(SK, dateStamp), sts).toString('hex');
+const key = signingKey(SK, dateStamp);
+const chunkSig = (data, prev) => { const ctx = `AWS4-HMAC-SHA256-PAYLOAD\n${amzDate}\n${scope}\n${prev}\n`; return hmac(key, `${ctx}${sha256(ctx)}\n${sha256(data)}`).toString('hex'); };
+const bodyParts = [];
+let prev = seedSignature;
+for (let off = 0; off < payload.length; off += CHUNK) {
+  const data = payload.subarray(off, Math.min(off + CHUNK, payload.length));
+  let sig = MODE === 'unsigned' ? '' : chunkSig(data, prev);
+  if (MODE === 'corrupt') sig = (sig[0] === '0' ? '1' : '0') + sig.slice(1);
+  const line = MODE === 'unsigned' ? `${data.length.toString(16)}\r\n` : `${data.length.toString(16)};chunk-signature=${sig}\r\n`;
+  bodyParts.push(Buffer.from(line, 'latin1'), data, Buffer.from('\r\n', 'latin1'));
+  if (MODE !== 'unsigned') prev = sig;
+}
+bodyParts.push(Buffer.from(MODE === 'unsigned' ? '0\r\n' : `0;chunk-signature=${chunkSig(Buffer.alloc(0), prev)}\r\n`, 'latin1'));
+if (MODE === 'trailer') bodyParts.push(Buffer.from(`x-amz-checksum-crc32:${Buffer.from(crc32(payload), 'hex').toString('base64')}\r\n\r\n`, 'latin1'));
+else if (MODE === 'badtrailer') bodyParts.push(Buffer.from('x-amz-checksum-crc32:AAAAAA==\r\n\r\n', 'latin1'));
+else bodyParts.push(Buffer.from('\r\n', 'latin1'));
+const body = Buffer.concat(bodyParts);
+const authHeader = `AWS4-HMAC-SHA256 Credential=${credential}, SignedHeaders=${signedHeaderList}, Signature=${seedSignature}`;
+const req = http.request({ host: '127.0.0.1', port: PORT, path: `/s3/smoke/awschunk-${MODE}.bin${query ? '?' + query : ''}`, method: 'PUT', headers: { ...headers, authorization: authHeader, 'content-length': String(body.length) } }, (res) => {
+  const chunks = [];
+  res.on('data', (c) => chunks.push(c));
+  res.on('end', () => process.stdout.write(String(res.statusCode) + ' ' + (res.headers['etag'] || '')));
+});
+req.on('error', (e) => process.stdout.write('ERR ' + e.message));
+req.end(body);
+EOF
+CHUNK_MD5=$(node -e "const b=Buffer.alloc(4*65536);for(let i=0;i<b.length;i++)b[i]=(i*31+7)&0xff;console.log(require('crypto').createHash('md5').update(b).digest('hex'))")
+check "aws-chunked signed streaming PUT -> 200" "200" "$(node "$TMP/awschunk-put.js" "$PORT" signed "" "$AK" "$SK" | cut -d' ' -f1)"
+check "aws-chunked unsigned streaming PUT -> 200" "200" "$(node "$TMP/awschunk-put.js" "$PORT" unsigned "" "$AK" "$SK" | cut -d' ' -f1)"
+check "aws-chunked checksum-trailer PUT -> 200" "200" "$(node "$TMP/awschunk-put.js" "$PORT" trailer "" "$AK" "$SK" | cut -d' ' -f1)"
+check "aws-chunked wrong trailer CRC -> 400" "400" "$(node "$TMP/awschunk-put.js" "$PORT" badtrailer "" "$AK" "$SK" | cut -d' ' -f1)"
+check "aws-chunked corrupted chunk signature -> 403" "403" "$(node "$TMP/awschunk-put.js" "$PORT" corrupt "" "$AK" "$SK" | cut -d' ' -f1)"
+check "aws-chunked signed PUT stored decoded payload" "$CHUNK_MD5" "$(curl -s "${AUTH_OPTS[@]}" "$B/s3/smoke/awschunk-signed.bin" | md5 -q)"
+check "aws-chunked unsigned PUT stored decoded payload" "$CHUNK_MD5" "$(curl -s "${AUTH_OPTS[@]}" "$B/s3/smoke/awschunk-unsigned.bin" | md5 -q)"
+check "aws-chunked trailer PUT stored decoded payload" "$CHUNK_MD5" "$(curl -s "${AUTH_OPTS[@]}" "$B/s3/smoke/awschunk-trailer.bin" | md5 -q)"
+check "aws-chunked ETag is md5 of decoded payload" "\"$CHUNK_MD5\"" "$(curl -s -D - -o /dev/null "${AUTH_OPTS[@]}" "$B/s3/smoke/awschunk-signed.bin" | tr -d '\r' | grep -i '^etag:' | cut -d' ' -f2)"
+check "aws-chunked corrupt request left no object" "404" "$(status_of "${AUTH_OPTS[@]}" "$B/s3/smoke/awschunk-corrupt.bin")"
+MP_CHUNK_XML="$(curl -s -X POST "${AUTH_OPTS[@]}" "$B/s3/smoke/awschunk-mp.bin?uploads")"
+MP_CHUNK_ID="$(printf '%s' "$MP_CHUNK_XML" | sed -n 's:.*<UploadId>\([^<]*\)</UploadId>.*:\1:p')"
+MP_CHUNK_R="$(node "$TMP/awschunk-put.js" "$PORT" signed "$MP_CHUNK_ID" "$AK" "$SK")"
+check "aws-chunked signed UploadPart -> 200" "200" "${MP_CHUNK_R%% *}"
+check "aws-chunked part ETag matches decoded md5" "\"$CHUNK_MD5\"" "${MP_CHUNK_R#* }"
+curl -s -o /dev/null -X POST "${AUTH_OPTS[@]}" -H "Content-Type: application/xml" --data "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>\"$CHUNK_MD5\"</ETag></Part></CompleteMultipartUpload>" "$B/s3/smoke/awschunk-mp.bin?uploadId=$MP_CHUNK_ID"
+check "aws-chunked multipart assembled from decoded part" "$CHUNK_MD5" "$(curl -s "${AUTH_OPTS[@]}" "$B/s3/smoke/awschunk-mp.bin" | md5 -q)"
 
 # --- presigned + public bucket ----------------------------------------------------
 echo "== presigned URL + public bucket =="
