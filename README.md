@@ -175,7 +175,10 @@ Once mapped: `https://cdn.yourdomain.com/<key>` streams objects directly. See `D
 
 ## 🖼️ Screenshots
 
-_→ TODO: capture the admin dashboard (Overview), the tenant S3 panel (Buckets/Keys/Domains), and the operator console (instance list with health/quota) and drop them here._
+![Overview](./screenshots/overview.png)
+![Buckets & Objects](./screenshots/buckets.png)
+![API Access Keys](./screenshots/api.png)
+![Custom Domain](./screenshots/domain.png)
 
 ---
 
