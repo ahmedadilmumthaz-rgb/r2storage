@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Globe, Plus, Trash2, CheckCircle, ShieldAlert, ArrowRight } from 'lucide-react';
+import { Globe, Plus, Trash2, Pencil, CheckCircle, ShieldAlert, ArrowRight } from 'lucide-react';
 import { adminFetch } from '../api';
 
 interface CustomDomain {
@@ -21,6 +21,12 @@ export const CustomDomainsTab: React.FC = () => {
   const [showModal, setShowModal] = useState(false);
   const [domainInput, setDomainInput] = useState('');
   const [selectedBucket, setSelectedBucket] = useState('');
+
+  // Edit Modal State
+  const [showEditModal, setShowEditModal] = useState(false);
+  const [editingDomain, setEditingDomain] = useState<CustomDomain | null>(null);
+  const [editDomainInput, setEditDomainInput] = useState('');
+  const [editBucket, setEditBucket] = useState('');
 
   const fetchDomains = async () => {
     try {
@@ -76,6 +82,36 @@ export const CustomDomainsTab: React.FC = () => {
     try {
       await adminFetch(`/api/admin/domains/${id}`, { method: 'DELETE' });
       fetchDomains();
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  const openEditModal = (d: CustomDomain) => {
+    setEditingDomain(d);
+    setEditDomainInput(d.domain);
+    setEditBucket(d.bucketName);
+    setShowEditModal(true);
+  };
+
+  const handleEditDomain = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingDomain || !editBucket) return;
+
+    try {
+      const res = await adminFetch(`/api/admin/domains/${editingDomain.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ domain: editDomainInput, bucketName: editBucket }),
+      });
+      if (res.ok) {
+        setShowEditModal(false);
+        setEditingDomain(null);
+        fetchDomains();
+      } else {
+        const errorData = await res.json();
+        alert(errorData.error || 'Failed to update custom domain');
+      }
     } catch (err) {
       console.error(err);
     }
@@ -140,6 +176,13 @@ export const CustomDomainsTab: React.FC = () => {
                   </td>
                   <td className="py-3 px-2 text-slate-400 text-xs">{new Date(d.createdAt).toLocaleDateString()}</td>
                   <td className="py-3 px-2 text-right">
+                    <button
+                      onClick={() => openEditModal(d)}
+                      className="p-1.5 text-slate-500 hover:text-brand-400 rounded-lg transition"
+                      title="Edit domain mapping"
+                    >
+                      <Pencil className="w-4 h-4" />
+                    </button>
                     <button
                       onClick={() => handleDeleteDomain(d.id)}
                       className="p-1.5 text-slate-500 hover:text-rose-400 rounded-lg transition"
@@ -208,6 +251,62 @@ export const CustomDomainsTab: React.FC = () => {
                   className="px-4 py-2 bg-brand-500 hover:bg-brand-600 text-white text-sm font-medium rounded-xl shadow-lg shadow-brand-500/20"
                 >
                   Add Domain
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Edit Domain Modal */}
+      {showEditModal && editingDomain && (
+        <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="glass-panel w-full max-w-md p-6 rounded-2xl space-y-6">
+            <h3 className="text-xl font-bold text-white">Edit Custom Domain</h3>
+            <form onSubmit={handleEditDomain} className="space-y-4">
+              <div>
+                <label className="block text-xs font-medium text-slate-300 mb-1">Domain Name</label>
+                <input
+                  type="text"
+                  placeholder="cdn.example.com"
+                  value={editDomainInput}
+                  onChange={(e) => setEditDomainInput(e.target.value.toLowerCase().trim())}
+                  className="w-full bg-dark-900 border border-slate-700 rounded-xl px-4 py-2.5 text-sm text-white focus:outline-none focus:border-brand-500 font-mono"
+                  required
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-slate-300 mb-1">Target Storage Bucket</label>
+                <select
+                  value={editBucket}
+                  onChange={(e) => setEditBucket(e.target.value)}
+                  className="w-full bg-dark-900 border border-slate-700 rounded-xl px-4 py-2.5 text-sm text-white focus:outline-none focus:border-brand-500"
+                >
+                  {buckets.map((b) => (
+                    <option key={b.id} value={b.name}>
+                      {b.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="flex items-center justify-end gap-3 pt-4">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowEditModal(false);
+                    setEditingDomain(null);
+                  }}
+                  className="px-4 py-2 text-slate-400 hover:text-white text-sm font-medium"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="px-4 py-2 bg-brand-500 hover:bg-brand-600 text-white text-sm font-medium rounded-xl shadow-lg shadow-brand-500/20"
+                >
+                  Save Changes
                 </button>
               </div>
             </form>

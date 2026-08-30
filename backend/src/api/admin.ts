@@ -317,6 +317,46 @@ export async function adminRoutes(fastify: FastifyInstance) {
     return await db.customDomain.findMany({ orderBy: { createdAt: 'desc' } });
   });
 
+  fastify.patch('/api/admin/domains/:id', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const { domain, bucketName } = req.body as { domain?: string; bucketName?: string };
+
+    const existing = await db.customDomain.findUnique({ where: { id } });
+    if (!existing) {
+      return reply.status(404).send({ error: 'Custom domain not found.' });
+    }
+
+    const data: { domain?: string; bucketName?: string } = {};
+    if (domain !== undefined) {
+      const normalized = domain.toLowerCase().trim();
+      if (!normalized) {
+        return reply.status(400).send({ error: 'Domain cannot be empty.' });
+      }
+      const taken = await db.customDomain.findUnique({ where: { domain: normalized } });
+      if (taken && taken.id !== id) {
+        return reply.status(409).send({ error: 'This domain is already mapped to a bucket.' });
+      }
+      data.domain = normalized;
+    }
+    if (bucketName !== undefined) {
+      if (!bucketName) {
+        return reply.status(400).send({ error: 'bucketName cannot be empty.' });
+      }
+      const bucket = await db.bucket.findUnique({ where: { name: bucketName } });
+      if (!bucket) {
+        return reply.status(404).send({ error: 'Bucket not found' });
+      }
+      data.bucketName = bucketName;
+    }
+
+    const updated = await db.customDomain.update({ where: { id }, data });
+    auditLog(req, 'domain.update', updated.domain, {
+      ...(data.domain !== undefined ? { domain } : {}),
+      ...(data.bucketName !== undefined ? { bucketName } : {}),
+    });
+    return updated;
+  });
+
   fastify.post('/api/admin/domains', async (req, reply) => {
     const { domain, bucketName } = req.body as { domain: string; bucketName: string };
     if (!domain || !bucketName) {

@@ -21,3 +21,4 @@ data/
 
 # Local code intelligence index (rebuilt by `codegraph init`)
 .codegraph/
+donotupload/
