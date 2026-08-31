@@ -1,9 +1,14 @@
 export async function adminFetch(url: string, options: RequestInit = {}): Promise<Response> {
   const isFormData = typeof FormData !== 'undefined' && options.body instanceof FormData;
+  // Only advertise a JSON body when one is actually present. Fastify rejects a
+  // request that declares Content-Type: application/json but sends zero bytes
+  // (FST_ERR_CTP_EMPTY_JSON_BODY -> 400), which broke every body-less
+  // DELETE (bucket/object/domain) issued through this helper.
+  const hasBody = options.body !== undefined && options.body !== null && !isFormData;
   const res = await fetch(url, {
     ...options,
     headers: {
-      ...(isFormData ? {} : { 'Content-Type': 'application/json' }),
+      ...(hasBody ? { 'Content-Type': 'application/json' } : {}),
       ...(options.headers || {}),
     },
   });
