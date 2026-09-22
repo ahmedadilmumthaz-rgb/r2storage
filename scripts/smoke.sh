@@ -157,6 +157,7 @@ SK="$(json_field "$R" secretAccessKey)"
 check "create scoped access key" "201" "$KEY_CODE"
 [ -n "$AK" ] || { echo "✗ could not parse access key"; exit 1; }
 [ -n "$SK" ] || { echo "✗ could not parse access key secret"; exit 1; }
+check "key with nonexistent bucketFilter rejected" "400" "$(status_of -b "$COOKIES" -X POST -H "Content-Type: application/json" -d '{"name":"bad-scope","permission":"FULL","bucketFilter":"does-not-exist"}' "$B/api/admin/keys")"
 
 # --- storage quota ---------------------------------------------------------------
 echo "== storage quota =="

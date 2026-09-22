@@ -288,6 +288,14 @@ export async function adminRoutes(fastify: FastifyInstance) {
   fastify.post('/api/admin/keys', async (req, reply) => {
     const { name, permission, bucketFilter } = req.body as { name?: string; permission?: string; bucketFilter?: string };
 
+    const scopeFilter = bucketFilter?.trim() || null;
+    if (scopeFilter) {
+      const exists = await db.bucket.findUnique({ where: { name: scopeFilter } });
+      if (!exists) {
+        return reply.status(400).send({ error: 'Bucket not found. Provide a valid bucket name for bucketFilter.' });
+      }
+    }
+
     const accessKeyId = 'r2_' + crypto.randomBytes(12).toString('hex');
     const secretAccessKey = crypto.randomBytes(24).toString('hex');
 
@@ -297,7 +305,7 @@ export async function adminRoutes(fastify: FastifyInstance) {
         secretAccessKey,
         name: name || 'API Key',
         permission: permission || 'FULL',
-        bucketFilter: bucketFilter || null,
+        bucketFilter: scopeFilter,
       },
     });
 

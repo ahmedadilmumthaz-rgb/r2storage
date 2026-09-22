@@ -14,9 +14,11 @@ interface AccessKey {
 
 export const AccessKeysTab: React.FC = () => {
   const [keys, setKeys] = useState<AccessKey[]>([]);
+  const [buckets, setBuckets] = useState<{ id: string; name: string }[]>([]);
   const [showModal, setShowModal] = useState(false);
   const [keyName, setKeyName] = useState('');
   const [permission, setPermission] = useState('FULL');
+  const [bucketFilter, setBucketFilter] = useState('');
   const [newlyCreatedKey, setNewlyCreatedKey] = useState<AccessKey | null>(null);
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
 
@@ -30,23 +32,37 @@ export const AccessKeysTab: React.FC = () => {
     }
   };
 
+  const fetchBuckets = async () => {
+    try {
+      const res = await adminFetch('/api/admin/buckets');
+      const json = await res.json();
+      setBuckets(json.map((b: { id: string; name: string }) => ({ id: b.id, name: b.name })));
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
   useEffect(() => {
     fetchKeys();
+    fetchBuckets();
   }, []);
 
   const handleCreateKey = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
+      const body: Record<string, string> = { name: keyName || 'API Key', permission };
+      if (bucketFilter) body.bucketFilter = bucketFilter;
       const res = await adminFetch('/api/admin/keys', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: keyName || 'API Key', permission }),
+        body: JSON.stringify(body),
       });
       const json = await res.json();
       if (res.ok) {
         setNewlyCreatedKey(json);
         setShowModal(false);
         setKeyName('');
+        setBucketFilter('');
         fetchKeys();
       }
     } catch (err) {
@@ -93,6 +109,7 @@ export const AccessKeysTab: React.FC = () => {
                 <th className="pb-3 px-2">Key Name</th>
                 <th className="pb-3 px-2">Access Key ID</th>
                 <th className="pb-3 px-2">Permissions</th>
+                <th className="pb-3 px-2">Bucket Scope</th>
                 <th className="pb-3 px-2">Created</th>
                 <th className="pb-3 px-2 text-right">Actions</th>
               </tr>
@@ -110,6 +127,15 @@ export const AccessKeysTab: React.FC = () => {
                       {k.permission}
                     </span>
                   </td>
+                  <td className="py-3 px-2">
+                    {k.bucketFilter ? (
+                      <span className="px-2 py-0.5 rounded text-xs font-semibold bg-amber-500/10 text-amber-400 border border-amber-500/20 font-mono">
+                        {k.bucketFilter}
+                      </span>
+                    ) : (
+                      <span className="text-xs text-slate-500">All Buckets</span>
+                    )}
+                  </td>
                   <td className="py-3 px-2 text-slate-400 text-xs">{new Date(k.createdAt).toLocaleDateString()}</td>
                   <td className="py-3 px-2 text-right">
                     <button
@@ -124,7 +150,7 @@ export const AccessKeysTab: React.FC = () => {
 
               {keys.length === 0 && (
                 <tr>
-                  <td colSpan={5} className="py-10 text-center text-slate-500 text-sm">
+                  <td colSpan={6} className="py-10 text-center text-slate-500 text-sm">
                     No API keys issued yet. Click "Issue New API Key" above.
                   </td>
                 </tr>
@@ -215,6 +241,25 @@ export const AccessKeysTab: React.FC = () => {
                   <option value="READ_ONLY">Read Only Access</option>
                   <option value="WRITE_ONLY">Write Only Access</option>
                 </select>
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-slate-300 mb-1">Bucket Scope</label>
+                <select
+                  value={bucketFilter}
+                  onChange={(e) => setBucketFilter(e.target.value)}
+                  className="w-full bg-dark-900 border border-slate-700 rounded-xl px-4 py-2.5 text-sm text-white focus:outline-none focus:border-brand-500"
+                >
+                  <option value="">All Buckets</option>
+                  {buckets.map((b) => (
+                    <option key={b.id} value={b.name}>
+                      {b.name}
+                    </option>
+                  ))}
+                </select>
+                <p className="text-xs text-slate-500 mt-1">
+                  Restrict this key to a single bucket. Scoped keys are denied (403) on any other bucket.
+                </p>
               </div>
 
               <div className="flex items-center justify-end gap-3 pt-4">
